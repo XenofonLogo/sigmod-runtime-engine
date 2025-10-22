@@ -36,7 +36,7 @@ struct CuckooMapData {
             d);
     }
 
-    // Initialize table capacity and clear data
+    // Initialize table capacity
     void reset(size_t cap) {
         capacity = 1;
         while (capacity < cap) capacity <<= 1;
