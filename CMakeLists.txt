@@ -8,18 +8,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 Include(FetchContent)
 
+# -----------------------------
+# Dependencies
+# -----------------------------
+
 FetchContent_Declare(
     Catch2
     URL https://github.com/catchorg/Catch2/archive/refs/tags/v3.8.0.tar.gz
 )
-
 FetchContent_MakeAvailable(Catch2)
 
 FetchContent_Declare(
     abseil
     URL https://github.com/abseil/abseil-cpp/releases/download/20240722.1/abseil-cpp-20240722.1.tar.gz
 )
-
 set(ABSL_PROPAGATE_CXX_STD ON)
 set(ABSL_ENABLE_INSTALL ON)
 FetchContent_MakeAvailable(abseil)
@@ -28,14 +30,12 @@ FetchContent_Declare(
     re2
     URL https://github.com/google/re2/releases/download/2024-07-02/re2-2024-07-02.tar.gz
 )
-
 FetchContent_MakeAvailable(re2)
 
 FetchContent_Declare(
     json
     URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
 )
-
 FetchContent_MakeAvailable(json)
 
 FetchContent_Declare(
@@ -49,14 +49,12 @@ FetchContent_Declare(
     range-v3
     URL https://github.com/ericniebler/range-v3/archive/refs/tags/0.12.0.tar.gz
 )
-
 FetchContent_MakeAvailable(range-v3)
 
 FetchContent_Declare(
     fmtlib
     URL https://github.com/fmtlib/fmt/releases/download/11.1.3/fmt-11.1.3.zip
 )
-
 FetchContent_MakeAvailable(fmtlib)
 
 FetchContent_Declare(
@@ -71,27 +69,40 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
 endif()
 FetchContent_MakeAvailable(duckdb)
 
-# Include all sources from /src directory. CONFIGURE_DEPENDS can be unreliable.
-# Try re-running cmake in case changes are not recognized.
+# -----------------------------
+# Add Tessil Hopscotch Map
+# -----------------------------
+FetchContent_Declare(
+    hopscotch_map
+    GIT_REPOSITORY https://github.com/Tessil/hopscotch-map.git
+    GIT_TAG master
+)
+
+FetchContent_MakeAvailable(hopscotch_map)
+
+# -----------------------------
+# Source Files
+# -----------------------------
 file(GLOB SIGMODPC_SRC
     CONFIGURE_DEPENDS
     "src/*.cpp"
 )
 
-# Enable server-specific compiler optimizations.
-# Use march=native for all but Power servers, which results in the following error:
-#    clang++-18: error: unsupported option '-march=' for target 'powerpc64le-unknown-linux-gnu'
-# This flag works on other Power systems, but for now, we disable march=native on all Power machines.
+# -----------------------------
+# Compiler Optimizations
+# -----------------------------
 if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
     add_compile_options(-march=native)
 endif()
 
+# -----------------------------
 # Targets
+# -----------------------------
 add_executable(run ${SIGMODPC_SRC} tests/read_sql.cpp)
 add_executable(unit_tests ${SIGMODPC_SRC} tests/unit_tests.cpp)
 add_executable(build_database tests/build_database.cpp)
 
-# For all executables
+# Windows compiler warnings
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(run PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(build_database PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -118,6 +129,16 @@ target_include_directories(run PRIVATE include)
 target_include_directories(build_database PRIVATE include)
 target_include_directories(unit_tests PRIVATE include)
 
+# -----------------------------
+# Include Hopscotch headers
+# -----------------------------
+target_include_directories(run PRIVATE ${hopscotch_map_SOURCE_DIR}/include)
+target_include_directories(unit_tests PRIVATE ${hopscotch_map_SOURCE_DIR}/include)
+target_include_directories(build_database PRIVATE ${hopscotch_map_SOURCE_DIR}/include)
 
-
-
+if(TARGET build_cache)
+    target_include_directories(build_cache PRIVATE ${hopscotch_map_SOURCE_DIR}/include)
+endif()
+if(TARGET fast)
+    target_include_directories(fast PRIVATE ${hopscotch_map_SOURCE_DIR}/include)
+endif()

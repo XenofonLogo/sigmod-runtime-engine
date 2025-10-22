@@ -8,10 +8,12 @@
 #include <string>
 #include <cstring>
 #include <optional>
-#include <unordered_map>
 #include <type_traits>
 #include <utility>
 #include <ranges>
+
+// Add Hopscotch hashing
+#include <tsl/hopscotch_map.h>
 
 namespace Contest {
 
@@ -19,7 +21,7 @@ using ExecuteResult = std::vector<std::vector<Data>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
-// Join algorithm using an unordered_map build (with safe normalization)
+// Join algorithm using Hopscotch hash map build (with safe normalization)
 struct JoinAlgorithm {
     bool                                             build_left;
     ExecuteResult&                                   left;
@@ -31,10 +33,9 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         namespace views = ranges::views;
-        std::unordered_map<T, std::vector<size_t>> hash_table;
+        tsl::hopscotch_map<T, std::vector<size_t>> hash_table;
 
         // Helper: try to produce a T from Key; returns std::optional<T>.
-        // This avoids ill-formed expressions for incompatible Key/T pairs.
         auto try_normalize = []<class Key>(const Key& key) -> std::optional<T> {
             if constexpr (std::is_same_v<Key, std::monostate>) {
                 return std::nullopt;
