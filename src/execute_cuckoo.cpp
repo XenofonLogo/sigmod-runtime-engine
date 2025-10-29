@@ -3,7 +3,7 @@
 #include <table.h>
 
 // Cuckoo Hashing
-#include <libcuckoo/cuckoohash_map.hh>
+#include <libcuckoo/cuckoohash_map.h>
 
 namespace Contest {
 
