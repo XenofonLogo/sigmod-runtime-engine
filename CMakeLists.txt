@@ -8,10 +8,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 Include(FetchContent)
 
-# -----------------------------
-# Dependencies
-# -----------------------------
-
 FetchContent_Declare(
     Catch2
     URL https://github.com/catchorg/Catch2/archive/refs/tags/v3.8.0.tar.gz
@@ -57,6 +53,29 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fmtlib)
 
+# -----------------------------
+# Add Tessil Hopscotch Map
+# -----------------------------
+FetchContent_Declare(
+    hopscotch_map
+    GIT_REPOSITORY https://github.com/Tessil/hopscotch-map.git
+    GIT_TAG master
+)
+FetchContent_MakeAvailable(hopscotch_map)
+
+# -----------------------------
+# Add Libcuckoo Cuckoo Map
+# -----------------------------
+FetchContent_Declare(
+    libcuckoo
+    GIT_REPOSITORY https://github.com/efficient/libcuckoo.git
+    GIT_TAG master
+)
+FetchContent_MakeAvailable(libcuckoo)
+
+# -----------------------------
+# Add DuckDB
+# -----------------------------
 FetchContent_Declare(
     duckdb
     URL https://github.com/duckdb/duckdb/archive/refs/tags/v1.2.1.tar.gz
@@ -69,55 +88,72 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
 endif()
 FetchContent_MakeAvailable(duckdb)
 
-# -----------------------------
-# Add Tessil Hopscotch Map
-# -----------------------------
-FetchContent_Declare(
-    hopscotch_map
-    GIT_REPOSITORY https://github.com/Tessil/hopscotch-map.git
-    GIT_TAG master
-)
-
-FetchContent_MakeAvailable(hopscotch_map)
-
-# -----------------------------
-# Source Files
-# -----------------------------
+# ------------------------------------------------------------
+# Choose which execute implementation to compile
+# ------------------------------------------------------------
 file(GLOB SIGMODPC_SRC
     CONFIGURE_DEPENDS
     "src/*.cpp"
 )
 
-# -----------------------------
-# Compiler Optimizations
-# -----------------------------
+file(GLOB SIGMODPC_EXECUTE_FILES
+    CONFIGURE_DEPENDS
+    "src/execute_*.cpp"
+)
+list(REMOVE_ITEM SIGMODPC_SRC ${SIGMODPC_EXECUTE_FILES})
+
+# Allow selecting implementation (default: robinhood)
+set(EXECUTE_IMPL "robinhood" CACHE STRING "Which execute variant: robinhood (default), hopscotch, cuckoo")
+
+if(EXECUTE_IMPL STREQUAL "robinhood")
+    set(EXECUTE_FILE "src/execute_robinhood.cpp")
+    set(EXECUTE_INCLUDES ${hopscotch_map_SOURCE_DIR}/include)
+elseif(EXECUTE_IMPL STREQUAL "hopscotch")
+    set(EXECUTE_FILE "src/execute_hopscotch.cpp")
+    set(EXECUTE_INCLUDES ${hopscotch_map_SOURCE_DIR}/include)
+elseif(EXECUTE_IMPL STREQUAL "cuckoo")
+    set(EXECUTE_FILE "src/execute_cuckoo.cpp")
+    set(EXECUTE_INCLUDES ${libcuckoo_SOURCE_DIR})
+else()
+    message(WARNING "Unknown EXECUTE_IMPL '${EXECUTE_IMPL}', defaulting to 'robinhood'.")
+    set(EXECUTE_FILE "src/execute_robinhood.cpp")
+    set(EXECUTE_INCLUDES ${hopscotch_map_SOURCE_DIR}/include)
+endif()
+
+message(STATUS "✅ Building with EXECUTE_IMPL=${EXECUTE_IMPL} (${EXECUTE_FILE})")
+
+list(APPEND SIGMODPC_SRC ${EXECUTE_FILE})
+
+# ------------------------------------------------------------
+# Compiler optimizations
+# ------------------------------------------------------------
 if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
     add_compile_options(-march=native)
 endif()
 
-# -----------------------------
+# ------------------------------------------------------------
 # Targets
-# -----------------------------
+# ------------------------------------------------------------
 add_executable(run ${SIGMODPC_SRC} tests/read_sql.cpp)
 add_executable(unit_tests ${SIGMODPC_SRC} tests/unit_tests.cpp)
 add_executable(build_database tests/build_database.cpp)
 
-# Windows compiler warnings
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(run PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(build_database PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(unit_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
-endif()
-
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+else()
     add_executable(build_cache ${SIGMODPC_SRC} tests/read_sql.cpp)
     add_executable(fast ${SIGMODPC_SRC} tests/read_sql.cpp)
 
     target_link_libraries(build_cache PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
     target_compile_definitions(build_cache PRIVATE TEAMOPT_USE_DUCKDB TEAMOPT_BUILD_CACHE)
+
     target_link_libraries(fast PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser)
-    target_include_directories(build_cache PRIVATE include)
-    target_include_directories(fast PRIVATE include)
+
+    # ✅ Only include what's needed for the chosen variant
+    target_include_directories(build_cache PRIVATE include ${EXECUTE_INCLUDES})
+    target_include_directories(fast PRIVATE include ${EXECUTE_INCLUDES})
 endif()
 
 target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
