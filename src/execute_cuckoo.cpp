@@ -3,7 +3,7 @@
 #include <table.h>
 
 // Cuckoo Hashing
-#include <libcuckoo/cuckoohash_map.h>
+#include <libcuckoo/cuckoohash_map.hh>
 
 namespace Contest {
 
@@ -25,7 +25,7 @@ struct JoinAlgorithm {
         namespace views = ranges::views;
         libcuckoo::cuckoohash_map<T, std::vector<size_t>> hash_table;
 
-        // Convert a key to type T if possible; returns std::nullopt if conversion fails
+        // Convert a key to type T if possible; return nullopt if conversion fails
         auto try_normalize = []<class Key>(const Key& key) -> std::optional<T> {
             if constexpr (std::is_same_v<Key, std::monostate>) return std::nullopt;
 
@@ -143,25 +143,25 @@ struct JoinAlgorithm {
 };
 
 ExecuteResult execute_hash_join(const Plan&          plan,
-                                const JoinNode&     join,
-                                const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    auto left_idx  = join.left;
-    auto right_idx = join.right;
-    auto& left_node   = plan.nodes[left_idx];
-    auto& right_node  = plan.nodes[right_idx];
-    auto& left_types  = left_node.output_attrs;
-    auto& right_types = right_node.output_attrs;
-    auto left  = execute_impl(plan, left_idx);
-    auto right = execute_impl(plan, right_idx);
+    const JoinNode&     join,
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    auto                           left_idx  = join.left;
+    auto                           right_idx = join.right;
+    auto&                          left_node   = plan.nodes[left_idx];
+    auto&                          right_node  = plan.nodes[right_idx];
+    auto&                          left_types  = left_node.output_attrs;
+    auto&                          right_types = right_node.output_attrs;
+    auto                           left       = execute_impl(plan, left_idx);
+    auto                           right      = execute_impl(plan, right_idx);
     std::vector<std::vector<Data>> results;
 
     JoinAlgorithm join_algorithm{.build_left = join.build_left,
-                                 .left       = left,
-                                 .right      = right,
-                                 .results    = results,
-                                 .left_col   = join.left_attr,
-                                 .right_col  = join.right_attr,
-                                 .output_attrs = output_attrs};
+        .left                                = left,
+        .right                               = right,
+        .results                             = results,
+        .left_col                            = join.left_attr,
+        .right_col                           = join.right_attr,
+        .output_attrs                        = output_attrs};
 
     // Dispatch join based on column data type
     if (join.build_left) {
@@ -186,8 +186,8 @@ ExecuteResult execute_hash_join(const Plan&          plan,
 }
 
 ExecuteResult execute_scan(const Plan& plan,
-                           const ScanNode& scan,
-                           const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    const ScanNode& scan,
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
     auto table_id = scan.base_table_id;
     auto& input   = plan.inputs[table_id];
     return Table::copy_scan(input, output_attrs);
