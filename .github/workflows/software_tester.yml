@@ -28,8 +28,8 @@ jobs:
 
       - name: Build
         run: |
-          cmake --build build-${{ matrix.impl }} --target hash_tester -- -j
+          cmake --build build-${{ matrix.impl }} --target software_tester -- -j
 
-      - name: Run hashing tests
+      - name: Run software tests
         run: |
           ./build-${{ matrix.impl }}/hash_tester --reporter compact
