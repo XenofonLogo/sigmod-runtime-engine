@@ -1,4 +1,4 @@
-name: Hashing Tester
+name: Software Tester
 
 on:
   push:
@@ -32,4 +32,4 @@ jobs:
 
       - name: Run software tests
         run: |
-          ./build-${{ matrix.impl }}/hash_tester --reporter compact
+          ./build-${{ matrix.impl }}/software_tester --reporter compact
