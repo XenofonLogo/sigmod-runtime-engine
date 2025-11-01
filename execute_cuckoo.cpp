@@ -2,7 +2,7 @@
 #include <plan.h>
 #include <table.h>
 
-// Cuckoo Hashing 
+// Cuckoo Hashing
 #include <libcuckoo/cuckoohash_map.hh>
 
 namespace Contest {

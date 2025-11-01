@@ -1,0 +1,35 @@
+name: Software Tester
+
+on:
+  push:
+    paths:
+      - 'src/execute_*.cpp'
+  pull_request:
+    paths:
+      - 'src/execute_*.cpp'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        impl: [robinhood, hopscotch, cuckoo]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get install -y build-essential cmake ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-${{ matrix.impl }} -DEXECUTE_IMPL=${{ matrix.impl }} -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          cmake --build build-${{ matrix.impl }} --target software_tester -- -j
+
+      - name: Run software tests
+        run: |
+          ./build-${{ matrix.impl }}/software_tester --reporter compact
