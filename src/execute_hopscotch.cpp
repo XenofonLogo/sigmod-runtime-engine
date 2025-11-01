@@ -70,7 +70,7 @@ struct JoinAlgorithm {
         //  Ο υπόλοιπος κώδικας παραμένει λογικά ίδιος, αλλά τώρα:
         //  Αγνοεί null ή ασύμβατα κλειδιά αντί να πετάει exception
         //  Χρησιμοποιεί την normalize συνάρτηση για ομαδοποίηση τύπων
-        //  Χρησιμοποιεί hopscotch_map για πιο γρήγορη πρόσβαση (cache-aware probing)
+        //  Χρησιμοποιεί hopscotch_map 
 
         if (build_left) {
             // Build phase (Left)
