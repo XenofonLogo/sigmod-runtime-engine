@@ -108,6 +108,8 @@ namespace Contest
                     ++probe;
                 }
             };
+        }
+    };
 
 /*            // build & probe phases
             if (build_left)
