@@ -69,16 +69,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(hopscotch_map)
 
-# -----------------------------
-# Add Libcuckoo Cuckoo Map
-# -----------------------------
-FetchContent_Declare(
-    libcuckoo
-    GIT_REPOSITORY https://github.com/efficient/libcuckoo.git
-    GIT_TAG master
-)
-FetchContent_MakeAvailable(libcuckoo)
-
 FetchContent_Declare(
     duckdb
     URL https://github.com/duckdb/duckdb/archive/refs/tags/v1.2.1.tar.gz
@@ -106,16 +96,18 @@ file(GLOB SIGMODPC_EXECUTE_FILES
 list(REMOVE_ITEM SIGMODPC_SRC ${SIGMODPC_EXECUTE_FILES})
 
 # Allow choosing which execute implementation to append (default: robinhood)
-set(EXECUTE_IMPL "robinhood" CACHE STRING "Which execute variant: robinhood (default), hopscotch, cuckoo")
-if(EXECUTE_IMPL STREQUAL "robinhood")
+set(EXECUTE_IMPL "robinhood" CACHE STRING "Which execute variant: robinhood, hopscotch, cuckoo")
+if(EXECUTE_IMPL STREQUAL "default")
+    set(EXECUTE_FILE "src/execute_default.cpp")
+elseif(EXECUTE_IMPL STREQUAL "robinhood")
     set(EXECUTE_FILE "src/execute_robinhood.cpp")
 elseif(EXECUTE_IMPL STREQUAL "hopscotch")
     set(EXECUTE_FILE "src/execute_hopscotch.cpp")
 elseif(EXECUTE_IMPL STREQUAL "cuckoo")
     set(EXECUTE_FILE "src/execute_cuckoo.cpp")
 else()
-    message(WARNING "Unknown EXECUTE_IMPL '${EXECUTE_IMPL}', defaulting to 'robinhood'.")
-    set(EXECUTE_FILE "src/execute_robinhood.cpp")
+    message(WARNING "Unknown EXECUTE_IMPL '${EXECUTE_IMPL}', executing default implementation.")
+    set(EXECUTE_FILE "src/execute_default.cpp")
 endif()
 
 list(APPEND SIGMODPC_SRC ${EXECUTE_FILE})
@@ -147,8 +139,8 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_link_libraries(build_cache PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
     target_compile_definitions(build_cache PRIVATE TEAMOPT_USE_DUCKDB TEAMOPT_BUILD_CACHE)
     target_link_libraries(fast PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser)
-    target_include_directories(build_cache PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${libcuckoo_SOURCE_DIR})
-    target_include_directories(fast PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${libcuckoo_SOURCE_DIR})
+    target_include_directories(build_cache PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
+    target_include_directories(fast PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
 endif()
 
 target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
@@ -161,8 +153,8 @@ target_link_libraries(unit_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain
 # -----------------------------
 add_executable(software_tester ${SIGMODPC_SRC} tests/software_tester.cpp)
 target_link_libraries(software_tester PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
-target_include_directories(software_tester PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${libcuckoo_SOURCE_DIR})
+target_include_directories(software_tester PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
 
-target_include_directories(run PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${libcuckoo_SOURCE_DIR})
-target_include_directories(build_database PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${libcuckoo_SOURCE_DIR})
-target_include_directories(unit_tests PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${libcuckoo_SOURCE_DIR})
+target_include_directories(run PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(build_database PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(unit_tests PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
