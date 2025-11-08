@@ -107,12 +107,19 @@ namespace Contest
                                 break;
                             }
 
-                            // Existing key → append row
-                            if (*b.key == cur_key)
-                            {
-                                b.indices.push_back(idx);
-                                break;
-                            }
+            // build & probe phases
+            if (build_left)
+            {
+                for (auto &&[idx, record] : left | views::enumerate)
+                {
+                    std::visit([&](const auto &key)
+                               {
+                    using Tk = std::decay_t<decltype(key)>;
+                    if constexpr (std::is_same_v<Tk, T>)
+                        rh_insert(key, idx);
+                    else if constexpr (!std::is_same_v<Tk, std::monostate>)
+                        throw std::runtime_error("wrong type of field"); }, record[left_col]);
+                }
 
                             // if current entry has smaller PSL, swap
                             if (b.psl < psl)
@@ -175,7 +182,6 @@ namespace Contest
             }
         }
     };
-
     ExecuteResult execute_hash_join(const Plan &plan,
                                     const JoinNode &join,
                                     const std::vector<std::tuple<size_t, DataType>> &output_attrs)

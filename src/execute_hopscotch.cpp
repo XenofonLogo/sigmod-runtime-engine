@@ -6,13 +6,12 @@
 #include <variant>
 #include <stdexcept>
 #include <string>
-#include <cstring>
 #include <optional>
 #include <type_traits>
 #include <utility>
 #include <ranges>
 
-// Add Hopscotch hashing
+//  προστέθηκε η βιβλιοθήκη hopscotch 
 #include <tsl/hopscotch_map.h>
 
 namespace Contest {
@@ -21,7 +20,8 @@ using ExecuteResult = std::vector<std::vector<Data>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
-// Join algorithm using Hopscotch hash map build (with safe normalization)
+//  αντικατάσταση std::unordered_map με tsl::hopscotch_map
+// + προσθήκη μηχανισμού "try_normalize" για ευέλικτη σύγκριση διαφορετικών τύπων.
 struct JoinAlgorithm {
     bool                                             build_left;
     ExecuteResult&                                   left;
@@ -33,16 +33,18 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         namespace views = ranges::views;
+
+        // Αλλαγή δομής δεδομένων: Hopscotch hashing table αντί για unordered_map
         tsl::hopscotch_map<T, std::vector<size_t>> hash_table;
 
-        // Helper: try to produce a T from Key; returns std::optional<T>.
+        // βοηθητική συνάρτηση για ασφαλή μετατροπή τύπων (π.χ. int->string)
+        // Επιστρέφει std::optional<T> ώστε να αποφευχθούν runtime σφάλματα.
         auto try_normalize = []<class Key>(const Key& key) -> std::optional<T> {
             if constexpr (std::is_same_v<Key, std::monostate>) {
                 return std::nullopt;
             }
 
             if constexpr (std::is_same_v<T, std::string>) {
-                // build on string: accept string-like or numeric/bool via to_string
                 if constexpr (std::is_convertible_v<Key, std::string_view>) {
                     return std::string(key);
                 } else if constexpr (std::is_arithmetic_v<Key>) {
@@ -51,14 +53,12 @@ struct JoinAlgorithm {
                     return std::nullopt;
                 }
             } else if constexpr (std::is_integral_v<T> || std::is_floating_point_v<T>) {
-                // build on numeric: accept only numeric or bool keys
                 if constexpr (std::is_arithmetic_v<Key>) {
                     return static_cast<T>(key);
                 } else {
                     return std::nullopt;
                 }
             } else {
-                // fallback: if Key is exactly T
                 if constexpr (std::is_same_v<Key, T>) {
                     return key;
                 } else {
@@ -67,8 +67,13 @@ struct JoinAlgorithm {
             }
         };
 
+        //  Ο υπόλοιπος κώδικας παραμένει λογικά ίδιος, αλλά τώρα:
+        //  Αγνοεί null ή ασύμβατα κλειδιά αντί να πετάει exception
+        //  Χρησιμοποιεί την normalize συνάρτηση για ομαδοποίηση τύπων
+        //  Χρησιμοποιεί hopscotch_map 
+
         if (build_left) {
-            // Build phase: iterate left and insert normalized keys
+            // Build phase (Left)
             for (auto&& [idx, record] : left | views::enumerate) {
                 std::visit(
                     [&](const auto& key) {
@@ -82,7 +87,7 @@ struct JoinAlgorithm {
                     record[left_col]);
             }
 
-            // Probe phase: iterate right and lookup normalized keys
+            // Probe phase (Right)
             for (auto& right_record : right) {
                 std::visit(
                     [&](const auto& key) {
@@ -111,7 +116,7 @@ struct JoinAlgorithm {
             }
 
         } else {
-            // Build on right
+            // Build phase (Right)
             for (auto&& [idx, record] : right | views::enumerate) {
                 std::visit(
                     [&](const auto& key) {
@@ -125,7 +130,7 @@ struct JoinAlgorithm {
                     record[right_col]);
             }
 
-            // Probe left
+            // Probe phase (Left)
             for (auto& left_record : left) {
                 std::visit(
                     [&](const auto& key) {
@@ -155,6 +160,10 @@ struct JoinAlgorithm {
         }
     }
 };
+
+// Δεν υπάρχουν λογικές αλλαγές από εδώ και κάτω.
+// Η μόνη διαφορά είναι ότι τώρα το JoinAlgorithm χρησιμοποιεί hopscotch_map
+// και προαιρετική ομαλοποίηση (normalization) των τύπων.
 
 ExecuteResult execute_hash_join(const Plan&          plan,
     const JoinNode&                                  join,
