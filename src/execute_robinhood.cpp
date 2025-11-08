@@ -83,6 +83,9 @@ namespace Contest
             const size_t build_idx_col = build_left ? left_col : right_col;
             const size_t probe_idx_col = build_left ? right_col : left_col;
 
+            // Always pivot by left row width — output schema always left first, then right
+            const size_t left_column_count = left.empty() ? 0 : left.front().size();
+
             size_t cap = next_power_of_two(build_table.size() * 2 + 1);
             std::vector<Bucket> table(cap);
             auto hash_fn = std::hash<T>{};
@@ -162,23 +165,28 @@ namespace Contest
                                 for (auto build_idx : b.indices)
                                 {
                                     const auto &build_record = build_table[build_idx];
+
+                                    // explicit left/right mapping (fixes failures)
+                                    const auto &left_record  = build_left ? build_record : probe_record;
+                                    const auto &right_record = build_left ? probe_record : build_record;
+
                                     std::vector<Data> new_record;
                                     new_record.reserve(output_attrs.size());
 
                                     // Construct joined output row from output_attrs mapping
                                     for (auto [col_idx, _] : output_attrs)
                                     {
-                                        if (col_idx < build_record.size())
-                                            new_record.emplace_back(build_record[col_idx]);
+                                        if (col_idx < left_column_count)
+                                            new_record.emplace_back(left_record[col_idx]);
                                         else
-                                            new_record.emplace_back(probe_record[col_idx - build_record.size()]);
+                                            new_record.emplace_back(right_record[col_idx - left_column_count]);
                                     }
+
                                     results.emplace_back(std::move(new_record));
                                 }
-                                break;
+                                break; // we found all entries for this key
                             }
 
-                            // continue probing
                             pos = (pos + 1) & (cap - 1);
                             ++probe_count;
                         }
@@ -207,7 +215,9 @@ namespace Contest
             .output_attrs = output_attrs};
 
         // Decide key type from the build side
-        auto &types = join.build_left ? plan.nodes[left_idx].output_attrs : plan.nodes[right_idx].output_attrs;
+        const auto &types = join.build_left
+                                ? plan.nodes[left_idx].output_attrs
+                                : plan.nodes[right_idx].output_attrs;
         size_t key_attr = join.build_left ? join.left_attr : join.right_attr;
         switch (std::get<1>(types[key_attr]))
         {
@@ -252,7 +262,7 @@ namespace Contest
     ColumnarTable execute(const Plan &plan, [[maybe_unused]] void *context)
     {
         // compute row-wise results
-        auto ret = execute_impl(plan, plan.root);
+        auto rows = execute_impl(plan, plan.root);
 
         std::vector<DataType> types;
         types.reserve(plan.nodes[plan.root].output_attrs.size());
@@ -260,9 +270,8 @@ namespace Contest
         {
             types.push_back(std::get<1>(attr));
         }
-
         // construct table and convert to columnar
-        Table table(std::move(ret), std::move(types));
+        Table table(std::move(rows), std::move(types));
         return table.to_columnar();
     }
 
