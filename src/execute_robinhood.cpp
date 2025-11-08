@@ -9,6 +9,7 @@
 #include <string>
 #include <variant>
 #include <functional>
+#include <type_traits>
 
 namespace Contest
 {
@@ -32,16 +33,18 @@ namespace Contest
             struct Bucket
             {
                 std::optional<T> key;
-                size_t psl = 0;             // probe-sequence-length
+                size_t psl = 0;              // probe-sequence-length
                 std::vector<size_t> indices; // all rows sharing this key
             };
 
             // Normalize different key types into type T
-            auto try_normalize = []<class Key>(const Key& key) -> std::optional<T> {
+            auto try_normalize = []<class Key>(const Key &key) -> std::optional<T>
+            {
                 if constexpr (std::is_same_v<Key, std::monostate>)
                     return std::nullopt;
 
-                if constexpr (std::is_same_v<T, std::string>) {
+                if constexpr (std::is_same_v<T, std::string>)
+                {
                     if constexpr (std::is_convertible_v<Key, std::string_view>)
                         return std::string(key);
                     else if constexpr (std::is_arithmetic_v<Key>)
@@ -49,13 +52,15 @@ namespace Contest
                     else
                         return std::nullopt;
                 }
-                else if constexpr (std::is_integral_v<T> || std::is_floating_point_v<T>) {
+                else if constexpr (std::is_integral_v<T> || std::is_floating_point_v<T>)
+                {
                     if constexpr (std::is_arithmetic_v<Key>)
                         return static_cast<T>(key);
                     else
                         return std::nullopt;
                 }
-                else {
+                else
+                {
                     if constexpr (std::is_same_v<Key, T>)
                         return key;
                     else
@@ -66,7 +71,8 @@ namespace Contest
             // Next power of two capacity
             auto next_power_of_two = [](size_t v)
             {
-                if (v == 0) return size_t(1);
+                if (v == 0)
+                    return size_t(1);
                 --v;
                 for (size_t shift = 1; shift < sizeof(size_t) * 8; shift <<= 1)
                     v |= v >> shift;
@@ -86,19 +92,22 @@ namespace Contest
             for (size_t idx = 0; idx < build_table.size(); ++idx)
             {
                 const auto &record = build_table[idx];
+
+                // visit the cell that holds the join key (could be a variant)
                 std::visit([&](const auto &raw_key)
-                {
+                           {
                     if (auto nkey = try_normalize(raw_key); nkey.has_value())
                     {
                         T cur_key = *nkey;
                         size_t pos = hash_fn(cur_key) & (cap - 1);
                         size_t psl = 0;
-                        std::vector<size_t> cur_indices{idx};
+                        std::vector<size_t> cur_indices{ idx };
 
                         while (true)
                         {
                             auto &b = table[pos];
-                            // Empty slot
+
+                            // Empty slot -> place the key and indices
                             if (!b.key.has_value())
                             {
                                 b.key = std::move(cur_key);
@@ -107,39 +116,33 @@ namespace Contest
                                 break;
                             }
 
-            // build & probe phases
-            if (build_left)
-            {
-                for (auto &&[idx, record] : left | views::enumerate)
-                {
-                    std::visit([&](const auto &key)
-                               {
-                    using Tk = std::decay_t<decltype(key)>;
-                    if constexpr (std::is_same_v<Tk, T>)
-                        rh_insert(key, idx);
-                    else if constexpr (!std::is_same_v<Tk, std::monostate>)
-                        throw std::runtime_error("wrong type of field"); }, record[left_col]);
-                }
+                            // Same key -> append row index
+                            if (*b.key == cur_key)
+                            {
+                                b.indices.push_back(idx);
+                                break;
+                            }
 
-                            // if current entry has smaller PSL, swap
+                            // Robin-Hood: if current bucket has smaller PSL than ours, swap
                             if (b.psl < psl)
                             {
                                 std::swap(cur_key, *b.key);
                                 std::swap(cur_indices, b.indices);
                                 std::swap(psl, b.psl);
                             }
+
+                            // advance
                             pos = (pos + 1) & (cap - 1);
                             ++psl;
                         }
-                    }
-                }, record[build_idx_col]);
+                    } }, record[build_idx_col]);
             }
 
             // probe phase — find matches
             for (const auto &probe_record : probe_table)
             {
                 std::visit([&](const auto &raw_key)
-                {
+                           {
                     if (auto nkey = try_normalize(raw_key); nkey.has_value())
                     {
                         T key = *nkey;
@@ -150,10 +153,11 @@ namespace Contest
                         {
                             auto &b = table[pos];
 
-                            // Empty or too short PSL → stop
+                            // Empty or too short PSL → stop probing
                             if (!b.key.has_value() || b.psl < probe_count)
                                 break;
-                            // Match
+
+                            // Match: emit (all) joined rows
                             if (*b.key == key)
                             {
                                 for (auto build_idx : b.indices)
@@ -162,7 +166,7 @@ namespace Contest
                                     std::vector<Data> new_record;
                                     new_record.reserve(output_attrs.size());
 
-                                    // Construct joined output row
+                                    // Construct joined output row from output_attrs mapping
                                     for (auto [col_idx, _] : output_attrs)
                                     {
                                         if (col_idx < build_record.size())
@@ -174,22 +178,22 @@ namespace Contest
                                 }
                                 break;
                             }
+
+                            // continue probing
                             pos = (pos + 1) & (cap - 1);
                             ++probe_count;
                         }
-                    }
-                }, probe_record[probe_idx_col]);
+                    } }, probe_record[probe_idx_col]);
             }
         }
     };
+
     ExecuteResult execute_hash_join(const Plan &plan,
                                     const JoinNode &join,
                                     const std::vector<std::tuple<size_t, DataType>> &output_attrs)
     {
         auto left_idx = join.left;
         auto right_idx = join.right;
-        auto &left_node = plan.nodes[left_idx];
-        auto &right_node = plan.nodes[right_idx];
         auto left = execute_impl(plan, left_idx);
         auto right = execute_impl(plan, right_idx);
         std::vector<std::vector<Data>> results;
@@ -203,8 +207,10 @@ namespace Contest
             .right_col = join.right_attr,
             .output_attrs = output_attrs};
 
-        auto &types = join.build_left ? left_node.output_attrs : right_node.output_attrs;
-        switch (std::get<1>(types[join.build_left ? join.left_attr : join.right_attr]))
+        // Decide key type from the build side
+        auto &types = join.build_left ? plan.nodes[left_idx].output_attrs : plan.nodes[right_idx].output_attrs;
+        size_t key_attr = join.build_left ? join.left_attr : join.right_attr;
+        switch (std::get<1>(types[key_attr]))
         {
         case DataType::INT32:
             join_algorithm.run<int32_t>();
@@ -218,6 +224,8 @@ namespace Contest
         case DataType::VARCHAR:
             join_algorithm.run<std::string>();
             break;
+        default:
+            throw std::runtime_error("unsupported join key type");
         }
 
         return results;
@@ -233,23 +241,22 @@ namespace Contest
     ExecuteResult execute_impl(const Plan &plan, size_t node_idx)
     {
         const auto &node = plan.nodes[node_idx];
-        return std::visit([&](const auto &value)
-        {
+        return std::visit([&](const auto &value) -> ExecuteResult
+                          {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>)
                 return execute_hash_join(plan, value, node.output_attrs);
             else
-                return execute_scan(plan, value, node.output_attrs);
-        }, node.data);
+                return execute_scan(plan, value, node.output_attrs); }, node.data);
     }
 
     ColumnarTable execute(const Plan &plan, [[maybe_unused]] void *context)
     {
-        namespace views = ranges::views;
+        namespace views = std::ranges::views;
         auto ret = execute_impl(plan, plan.root);
         auto types = plan.nodes[plan.root].output_attrs | views::transform([](auto &v)
                                                                            { return std::get<1>(v); }) |
-                     ranges::to<std::vector<DataType>>();
+                     std::ranges::to<std::vector<DataType>>();
         Table table{std::move(ret), std::move(types)};
         return table.to_columnar();
     }
