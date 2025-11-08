@@ -3,6 +3,12 @@
 #include <table.h>
 #include <optional>
 #include <ranges>
+#include <stdexcept>
+#include <vector>
+#include <tuple>
+#include <string>
+#include <variant>
+#include <functional>
 
 namespace Contest
 {
@@ -22,17 +28,45 @@ namespace Contest
         template <typename T>
         void run()
         {
+            // A robin-hood hash table bucket
             struct Bucket
             {
                 std::optional<T> key;
-                size_t psl = 0;
-                std::vector<size_t> indices;
+                size_t psl = 0;             // probe-sequence-length
+                std::vector<size_t> indices; // all rows sharing this key
             };
 
+            // Normalize different key types into type T
+            auto try_normalize = []<class Key>(const Key& key) -> std::optional<T> {
+                if constexpr (std::is_same_v<Key, std::monostate>)
+                    return std::nullopt;
+
+                if constexpr (std::is_same_v<T, std::string>) {
+                    if constexpr (std::is_convertible_v<Key, std::string_view>)
+                        return std::string(key);
+                    else if constexpr (std::is_arithmetic_v<Key>)
+                        return std::to_string(key);
+                    else
+                        return std::nullopt;
+                }
+                else if constexpr (std::is_integral_v<T> || std::is_floating_point_v<T>) {
+                    if constexpr (std::is_arithmetic_v<Key>)
+                        return static_cast<T>(key);
+                    else
+                        return std::nullopt;
+                }
+                else {
+                    if constexpr (std::is_same_v<Key, T>)
+                        return key;
+                    else
+                        return std::nullopt;
+                }
+            };
+
+            // Next power of two capacity
             auto next_power_of_two = [](size_t v)
             {
-                if (v == 0)
-                    return size_t(1);
+                if (v == 0) return size_t(1);
                 --v;
                 for (size_t shift = 1; shift < sizeof(size_t) * 8; shift <<= 1)
                     v |= v >> shift;
@@ -48,25 +82,23 @@ namespace Contest
             std::vector<Bucket> table(cap);
             auto hash_fn = std::hash<T>{};
 
-            // ---- Insert keys into hash table ----
+            // build phase — insert rows into robin-hood hash table
             for (size_t idx = 0; idx < build_table.size(); ++idx)
             {
                 const auto &record = build_table[idx];
-                std::visit([&](const auto &key_val)
-                           {
-                    using K = std::decay_t<decltype(key_val)>;
-                    if constexpr (!std::is_same_v<K, T> && !std::is_same_v<K, std::monostate>)
-                        throw std::runtime_error("Build column has wrong type");
-                    if constexpr (std::is_same_v<K, T>)
+                std::visit([&](const auto &raw_key)
+                {
+                    if (auto nkey = try_normalize(raw_key); nkey.has_value())
                     {
-                        size_t pos = hash_fn(key_val) & (cap - 1);
+                        T cur_key = *nkey;
+                        size_t pos = hash_fn(cur_key) & (cap - 1);
                         size_t psl = 0;
-                        T cur_key = key_val;
                         std::vector<size_t> cur_indices{idx};
 
                         while (true)
                         {
                             auto &b = table[pos];
+                            // Empty slot
                             if (!b.key.has_value())
                             {
                                 b.key = std::move(cur_key);
@@ -75,44 +107,47 @@ namespace Contest
                                 break;
                             }
 
+                            // Existing key → append row
                             if (*b.key == cur_key)
                             {
                                 b.indices.push_back(idx);
                                 break;
                             }
 
+                            // if current entry has smaller PSL, swap
                             if (b.psl < psl)
                             {
-                                std::swap(b.key, cur_key);
-                                std::swap(b.indices, cur_indices);
-                                std::swap(b.psl, psl);
+                                std::swap(cur_key, *b.key);
+                                std::swap(cur_indices, b.indices);
+                                std::swap(psl, b.psl);
                             }
-
                             pos = (pos + 1) & (cap - 1);
                             ++psl;
                         }
-                    } }, record[build_idx_col]);
+                    }
+                }, record[build_idx_col]);
             }
 
-            // ---- Probe phase ----
+            // probe phase — find matches
             for (const auto &probe_record : probe_table)
             {
-                std::visit([&](const auto &key_val)
-                           {
-                    using K = std::decay_t<decltype(key_val)>;
-                    if constexpr (!std::is_same_v<K, T> && !std::is_same_v<K, std::monostate>)
-                        throw std::runtime_error("Probe column has wrong type");
-                    if constexpr (std::is_same_v<K, T>)
+                std::visit([&](const auto &raw_key)
+                {
+                    if (auto nkey = try_normalize(raw_key); nkey.has_value())
                     {
-                        size_t pos = hash_fn(key_val) & (cap - 1);
+                        T key = *nkey;
+                        size_t pos = hash_fn(key) & (cap - 1);
                         size_t probe_count = 0;
 
                         while (true)
                         {
                             auto &b = table[pos];
+
+                            // Empty or too short PSL → stop
                             if (!b.key.has_value() || b.psl < probe_count)
                                 break;
-                            if (*b.key == key_val)
+                            // Match
+                            if (*b.key == key)
                             {
                                 for (auto build_idx : b.indices)
                                 {
@@ -120,6 +155,7 @@ namespace Contest
                                     std::vector<Data> new_record;
                                     new_record.reserve(output_attrs.size());
 
+                                    // Construct joined output row
                                     for (auto [col_idx, _] : output_attrs)
                                     {
                                         if (col_idx < build_record.size())
@@ -134,10 +170,12 @@ namespace Contest
                             pos = (pos + 1) & (cap - 1);
                             ++probe_count;
                         }
-                    } }, probe_record[probe_idx_col]);
+                    }
+                }, probe_record[probe_idx_col]);
             }
         }
     };
+
     ExecuteResult execute_hash_join(const Plan &plan,
                                     const JoinNode &join,
                                     const std::vector<std::tuple<size_t, DataType>> &output_attrs)
@@ -190,12 +228,13 @@ namespace Contest
     {
         const auto &node = plan.nodes[node_idx];
         return std::visit([&](const auto &value)
-                          {
+        {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>)
                 return execute_hash_join(plan, value, node.output_attrs);
             else
-                return execute_scan(plan, value, node.output_attrs); }, node.data);
+                return execute_scan(plan, value, node.output_attrs);
+        }, node.data);
     }
 
     ColumnarTable execute(const Plan &plan, [[maybe_unused]] void *context)
