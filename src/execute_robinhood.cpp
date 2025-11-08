@@ -2,7 +2,6 @@
 #include <plan.h>
 #include <table.h>
 #include <optional>
-#include <ranges>
 #include <stdexcept>
 #include <vector>
 #include <tuple>
@@ -252,12 +251,18 @@ namespace Contest
 
     ColumnarTable execute(const Plan &plan, [[maybe_unused]] void *context)
     {
-        namespace views = std::ranges::views;
+        // compute row-wise results
         auto ret = execute_impl(plan, plan.root);
-        auto types = plan.nodes[plan.root].output_attrs | views::transform([](auto &v)
-                                                                           { return std::get<1>(v); }) |
-                     std::ranges::to<std::vector<DataType>>();
-        Table table{std::move(ret), std::move(types)};
+
+        std::vector<DataType> types;
+        types.reserve(plan.nodes[plan.root].output_attrs.size());
+        for (const auto &attr : plan.nodes[plan.root].output_attrs)
+        {
+            types.push_back(std::get<1>(attr));
+        }
+
+        // construct table and convert to columnar
+        Table table(std::move(ret), std::move(types));
         return table.to_columnar();
     }
 
