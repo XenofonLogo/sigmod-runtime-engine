@@ -2,8 +2,7 @@
 #include <plan.h>
 #include <table.h>
 
-// Cuckoo Hashing (vendored headers in include/libcuckoo)
-// Prefer local include to make it explicit we're using the vendored copy.
+// Cuckoo Hashing Map
 #include "cuckoo/cuckoohash_map.hh"
 
 namespace Contest {
