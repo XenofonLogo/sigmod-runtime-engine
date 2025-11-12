@@ -14,7 +14,7 @@
 // A small, standalone hashing quality tester.
 // It checks collision rate, bucket distribution uniformity (chi-sq-like),
 // and a simple avalanche test for std::hash on a few common key types.
-
+//test xeno
 static std::mt19937_64 rng(123456789);
 
 static size_t hamming_distance(size_t a, size_t b) {
