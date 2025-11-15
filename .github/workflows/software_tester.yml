@@ -11,7 +11,7 @@ on:
 jobs:
   build-and-test:
     runs-on:
-    group: k23a
+      group: k23a
     strategy:
       matrix:
         impl: [robinhood, hopscotch, cuckoo]
