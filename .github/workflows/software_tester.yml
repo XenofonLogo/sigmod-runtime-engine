@@ -3,10 +3,10 @@ name: Build Status
 on:
   push:
     paths:
-      - 'src/execute_*.cpp'
+      - "src/execute_*.cpp"
   pull_request:
     paths:
-      - 'src/execute_*.cpp'
+      - "src/execute_*.cpp"
 
 jobs:
   build-and-test:
