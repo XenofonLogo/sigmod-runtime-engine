@@ -2,8 +2,8 @@
 #include <plan.h>
 #include <table.h>
 
-// Cuckoo Hashing Map
-#include "cuckoo/cuckoohash_map.hh"
+// Include custom Cuckoo Map implementation.
+#include "cuckoo_map.h"
 
 namespace Contest {
 
@@ -11,7 +11,7 @@ using ExecuteResult = std::vector<std::vector<Data>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
-// Join algorithm using cuckoohash_map
+// Hash join algorithm implementation using CuckooMap.
 struct JoinAlgorithm {
     bool                                             build_left;
     ExecuteResult&                                   left;
@@ -23,9 +23,9 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         namespace views = ranges::views;
-        libcuckoo::cuckoohash_map<T, std::vector<size_t>> hash_table;
+        CuckooMap<T, std::vector<size_t>> hash_table;
 
-        // Convert a key to type T if possible; return nullopt if conversion fails
+        // Attempt key conversion to type T, returning nullopt on failure.
         auto try_normalize = []<class Key>(const Key& key) -> std::optional<T> {
             if constexpr (std::is_same_v<Key, std::monostate>) return std::nullopt;
 
@@ -46,7 +46,7 @@ struct JoinAlgorithm {
         };
 
         if (build_left) {
-            // Build hash table from left side
+            // Populate the hash table using records from the left relation.
             for (auto&& [idx, record] : left | views::enumerate) {
                 std::visit([&](const auto& key) {
                     using KeyT = std::decay_t<decltype(key)>;
@@ -56,7 +56,7 @@ struct JoinAlgorithm {
                             std::vector<size_t> existing;
                             if (hash_table.find(*opt, existing)) {
                                 existing.push_back(idx);
-                                hash_table.update(*opt, std::move(existing));
+                                hash_table.upsert(*opt, std::move(existing));
                             } else {
                                 hash_table.insert(*opt, std::move(vec));
                             }
@@ -64,8 +64,8 @@ struct JoinAlgorithm {
                     }
                 }, record[left_col]);
             }
-
-            // Probe hash table using right side
+            
+            // Probe the hash table using records from the right relation.
             for (auto& right_record : right) {
                 std::visit([&](const auto& key) {
                     using KeyT = std::decay_t<decltype(key)>;
@@ -93,7 +93,7 @@ struct JoinAlgorithm {
             }
 
         } else {
-            // Build hash table from right side
+            // Populate the hash table using records from the right relation.
             for (auto&& [idx, record] : right | views::enumerate) {
                 std::visit([&](const auto& key) {
                     using KeyT = std::decay_t<decltype(key)>;
@@ -103,7 +103,7 @@ struct JoinAlgorithm {
                             std::vector<size_t> existing;
                             if (hash_table.find(*opt, existing)) {
                                 existing.push_back(idx);
-                                hash_table.update(*opt, std::move(existing));
+                                hash_table.upsert(*opt, std::move(existing));
                             } else {
                                 hash_table.insert(*opt, std::move(vec));
                             }
@@ -112,7 +112,7 @@ struct JoinAlgorithm {
                 }, record[right_col]);
             }
 
-            // Probe hash table using left side
+            // Probe the hash table using records from the left relation.
             for (auto& left_record : left) {
                 std::visit([&](const auto& key) {
                     using KeyT = std::decay_t<decltype(key)>;
@@ -163,7 +163,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .right_col                           = join.right_attr,
         .output_attrs                        = output_attrs};
 
-    // Dispatch join based on column data type
+    // Instantiate and run the join algorithm based on the column data type.
     if (join.build_left) {
         switch (std::get<1>(left_types[join.left_attr])) {
             case DataType::INT32:   join_algorithm.run<int32_t>(); break;
