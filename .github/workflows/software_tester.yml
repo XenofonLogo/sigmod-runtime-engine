@@ -22,7 +22,7 @@ jobs:
 
       - name: Configure
         run: |
-          cmake -S . -B build-${{ matrix.impl }} -DEXECUTE_IMPL=${{ matrix.impl }} -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build-${{ matrix.impl }} -DEXECUTE_IMPL=${{ matrix.impl }} -DCMAKE_BUILD_TYPE=Release -Wno-dev
 
       - name: Build
         run: |
