@@ -22,116 +22,27 @@ struct JoinAlgorithm {
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
 
     // Replace std::unordered_map-based join with UnchainedHashTable-based join.
-    template <class T>
-    auto run() {
-        namespace views = ranges::views;
+    // Returns a direct view into the bucket: pointer + length
+// Does NOT allocate, does NOT compare keys — the caller does that.
+std::pair<const entry_type*, std::size_t>
+probe_view(const Key& key) const {
+    uint64_t h = compute_hash(key);
+    std::size_t prefix = static_cast<std::size_t>((h >> 16) & dir_mask_);
+    const dir_entry& de = directory_[prefix];
 
-        // Use our unchained hashtable templated on T.
-        // Hasher default (Hash::Hasher32) is fine; compute_hash falls back to std::hash for non-int types.
-        UnchainedHashTable<T, Hash::Hasher32> ht;
+    if (de.begin_idx >= de.end_idx)
+        return {nullptr, 0};
 
-        if (build_left) {
-            // Build phase: iterate left, collect (key,rowid) pairs
-            std::vector<std::pair<T, std::size_t>> entries;
-            entries.reserve(left.size());
-            for (auto&& [idx, record] : left | views::enumerate) {
-                std::visit(
-                    [&entries, idx = idx](const auto& key) {
-                        using Tk = std::decay_t<decltype(key)>;
-                        if constexpr (std::is_same_v<Tk, T>) {
-                            entries.emplace_back(key, idx);
-                        } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
-                            throw std::runtime_error("wrong type of field in build side");
-                        }
-                    },
-                    record[left_col]);
-            }
+    // bloom filter fast reject
+    uint16_t tag = Bloom::make_tag_from_hash(h);
+    if (!Bloom::maybe_contains(de.bloom, tag))
+        return {nullptr, 0};
 
-            ht.reserve(entries.size());
-            ht.build_from_entries(entries);
+    const entry_type* base = &tuples_[de.begin_idx];
+    std::size_t len = de.end_idx - de.begin_idx;
+    return {base, len};
+}
 
-            // Probe phase: iterate right and probe into ht
-            for (auto& right_record : right) {
-                std::visit(
-                    [&](const auto& key) {
-                        using Tk = std::decay_t<decltype(key)>;
-                        if constexpr (std::is_same_v<Tk, T>) {
-                            // get matching left row ids
-                            auto matches = ht.probe_exact(key);
-                            if (!matches.empty()) {
-                                for (auto left_idx : matches) {
-                                    auto& left_record = left[left_idx];
-                                    std::vector<Data> new_record;
-                                    new_record.reserve(output_attrs.size());
-                                    for (auto [col_idx, _] : output_attrs) {
-                                        if (col_idx < left_record.size()) {
-                                            new_record.emplace_back(left_record[col_idx]);
-                                        } else {
-                                            new_record.emplace_back(
-                                                right_record[col_idx - left_record.size()]);
-                                        }
-                                    }
-                                    results.emplace_back(std::move(new_record));
-                                }
-                            }
-                        } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
-                            throw std::runtime_error("wrong type of field in probe side");
-                        }
-                    },
-                    right_record[right_col]);
-            }
-
-        } else {
-            // build on right
-            std::vector<std::pair<T, std::size_t>> entries;
-            entries.reserve(right.size());
-            for (auto&& [idx, record] : right | views::enumerate) {
-                std::visit(
-                    [&entries, idx = idx](const auto& key) {
-                        using Tk = std::decay_t<decltype(key)>;
-                        if constexpr (std::is_same_v<Tk, T>) {
-                            entries.emplace_back(key, idx);
-                        } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
-                            throw std::runtime_error("wrong type of field in build side");
-                        }
-                    },
-                    record[right_col]);
-            }
-
-            ht.reserve(entries.size());
-            ht.build_from_entries(entries);
-
-            // probe left
-            for (auto& left_record : left) {
-                std::visit(
-                    [&](const auto& key) {
-                        using Tk = std::decay_t<decltype(key)>;
-                        if constexpr (std::is_same_v<Tk, T>) {
-                            auto matches = ht.probe_exact(key);
-                            if (!matches.empty()) {
-                                for (auto right_idx : matches) {
-                                    auto& right_record = right[right_idx];
-                                    std::vector<Data> new_record;
-                                    new_record.reserve(output_attrs.size());
-                                    for (auto [col_idx, _] : output_attrs) {
-                                        if (col_idx < left_record.size()) {
-                                            new_record.emplace_back(left_record[col_idx]);
-                                        } else {
-                                            new_record.emplace_back(
-                                                right_record[col_idx - left_record.size()]);
-                                        }
-                                    }
-                                    results.emplace_back(std::move(new_record));
-                                }
-                            }
-                        } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
-                            throw std::runtime_error("wrong type of field in probe side");
-                        }
-                    },
-                    left_record[left_col]);
-            }
-        }
-    }
 };
 
 ExecuteResult execute_hash_join(const Plan&          plan,

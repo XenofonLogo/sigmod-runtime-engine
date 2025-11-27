@@ -141,18 +141,27 @@ public:
         return (len==0) ? nullptr : &tuples_[begin];
     }
 
-    // Return exact matching entries (vector of row_ids) by scanning bucket and comparing keys
-    std::vector<std::size_t> probe_exact(const Key& key) const {
-        std::size_t len;
-        const entry_type* base = probe(key, len);
-        std::vector<std::size_t> out;
-        if (!base || len == 0) return out;
+    // Returns a direct view into the bucket: pointer + length
+// Does NOT allocate, does NOT compare keys — the caller does that.
+std::pair<const entry_type*, std::size_t>
+probe_view(const Key& key) const {
+    uint64_t h = compute_hash(key);
+    std::size_t prefix = static_cast<std::size_t>((h >> 16) & dir_mask_);
+    const dir_entry& de = directory_[prefix];
 
-        for (std::size_t i = 0; i < len; ++i) {
-            if (base[i].key == key) out.push_back(base[i].row_id);
-        }
-        return out;
-    }
+    if (de.begin_idx >= de.end_idx)
+        return {nullptr, 0};
+
+    // bloom filter fast reject
+    uint16_t tag = Bloom::make_tag_from_hash(h);
+    if (!Bloom::maybe_contains(de.bloom, tag))
+        return {nullptr, 0};
+
+    const entry_type* base = &tuples_[de.begin_idx];
+    std::size_t len = de.end_idx - de.begin_idx;
+    return {base, len};
+}
+
 
     std::size_t size() const noexcept { return tuples_.size(); }
     std::size_t dir_size() const noexcept { return dir_size_; }
