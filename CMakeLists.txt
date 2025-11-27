@@ -153,6 +153,7 @@ target_link_libraries(unit_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain
 # -----------------------------
 add_executable(software_tester ${SIGMODPC_SRC} tests/software_tester.cpp)
 target_link_libraries(software_tester PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
+target_compile_definitions(software_tester PRIVATE TEAMOPT_BUILD_CACHE)
 target_include_directories(software_tester PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
 
 target_include_directories(run PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
