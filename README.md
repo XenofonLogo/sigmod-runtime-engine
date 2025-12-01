@@ -25,7 +25,7 @@ cmake --build build -- -j $(nproc)
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
-cmake --build build -- -j $(nproc)
+cmake --build build -- -j $(nproc) fast
 ```
 
 ##### Οι τρείς υλοποιήσεις
@@ -33,15 +33,15 @@ cmake --build build -- -j $(nproc)
 ```bash
 # Για την 'robinhood'
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DEXECUTE_IMPL=robinhood -Wno-dev
-cmake --build build -- -j $(nproc)
+cmake --build build -- -j $(nproc) fast
 
 # Για την 'hopscotch'
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DEXECUTE_IMPL=hopscotch -Wno-dev
-cmake --build build -- -j $(nproc)
+cmake --build build -- -j $(nproc) fast
 
 # Για την 'cuckoo'
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DEXECUTE_IMPL=cuckoo -Wno-dev
-cmake --build build -- -j $(nproc)
+cmake --build build -- -j $(nproc) fast
 ```
 
 > ***Σημείωση:*** Το υπόλοιπο της εκτέλεσης είναι ίδιο
