@@ -1,9 +1,16 @@
 #include <hardware.h>
 #include <plan.h>
 #include <table.h>
-
-// Include custom Cuckoo Map implementation.
 #include "cuckoo_map.h"
+#include "late_materialization.h"
+
+// Additional includes used by the integration helpers below
+#include <optional>
+#include <type_traits>
+#include <string_view>
+#include <set>
+#include <algorithm>
+#include <iterator>
 
 namespace Contest {
 
@@ -11,179 +18,9 @@ using ExecuteResult = std::vector<std::vector<Data>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
-// Hash join algorithm implementation using CuckooMap.
-struct JoinAlgorithm {
-    bool                                             build_left;
-    ExecuteResult&                                   left;
-    ExecuteResult&                                   right;
-    ExecuteResult&                                   results;
-    size_t                                           left_col, right_col;
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs;
-
-    template <class T>
-    auto run() {
-        namespace views = ranges::views;
-        CuckooMap<T, std::vector<size_t>> hash_table;
-
-        // Attempt key conversion to type T, returning nullopt on failure.
-        auto try_normalize = []<class Key>(const Key& key) -> std::optional<T> {
-            if constexpr (std::is_same_v<Key, std::monostate>) return std::nullopt;
-
-            if constexpr (std::is_same_v<T, std::string>) {
-                if constexpr (std::is_convertible_v<Key, std::string_view>)
-                    return std::string(key);
-                else if constexpr (std::is_arithmetic_v<Key>)
-                    return std::to_string(key);
-                else
-                    return std::nullopt;
-            } else if constexpr (std::is_integral_v<T> || std::is_floating_point_v<T>) {
-                if constexpr (std::is_arithmetic_v<Key>) return static_cast<T>(key);
-                else return std::nullopt;
-            } else {
-                if constexpr (std::is_same_v<Key, T>) return key;
-                else return std::nullopt;
-            }
-        };
-
-        if (build_left) {
-            // Populate the hash table using records from the left relation.
-            for (auto&& [idx, record] : left | views::enumerate) {
-                std::visit([&](const auto& key) {
-                    using KeyT = std::decay_t<decltype(key)>;
-                    if constexpr (!std::is_same_v<KeyT, std::monostate>) {
-                        if (auto opt = try_normalize.template operator()<KeyT>(key)) {
-                            std::vector<size_t> vec{idx};
-                            std::vector<size_t> existing;
-                            if (hash_table.find(*opt, existing)) {
-                                existing.push_back(idx);
-                                hash_table.upsert(*opt, std::move(existing));
-                            } else {
-                                hash_table.insert(*opt, std::move(vec));
-                            }
-                        }
-                    }
-                }, record[left_col]);
-            }
-            
-            // Probe the hash table using records from the right relation.
-            for (auto& right_record : right) {
-                std::visit([&](const auto& key) {
-                    using KeyT = std::decay_t<decltype(key)>;
-                    if constexpr (!std::is_same_v<KeyT, std::monostate>) {
-                        if (auto opt = try_normalize.template operator()<KeyT>(key)) {
-                            std::vector<size_t> found;
-                            if (hash_table.find(*opt, found)) {
-                                for (auto left_idx : found) {
-                                    auto& left_record = left[left_idx];
-                                    std::vector<Data> new_record;
-                                    new_record.reserve(output_attrs.size());
-                                    for (auto [col_idx, _] : output_attrs) {
-                                        if (col_idx < left_record.size())
-                                            new_record.emplace_back(left_record[col_idx]);
-                                        else
-                                            new_record.emplace_back(
-                                                right_record[col_idx - left_record.size()]);
-                                    }
-                                    results.emplace_back(std::move(new_record));
-                                }
-                            }
-                        }
-                    }
-                }, right_record[right_col]);
-            }
-
-        } else {
-            // Populate the hash table using records from the right relation.
-            for (auto&& [idx, record] : right | views::enumerate) {
-                std::visit([&](const auto& key) {
-                    using KeyT = std::decay_t<decltype(key)>;
-                    if constexpr (!std::is_same_v<KeyT, std::monostate>) {
-                        if (auto opt = try_normalize.template operator()<KeyT>(key)) {
-                            std::vector<size_t> vec{idx};
-                            std::vector<size_t> existing;
-                            if (hash_table.find(*opt, existing)) {
-                                existing.push_back(idx);
-                                hash_table.upsert(*opt, std::move(existing));
-                            } else {
-                                hash_table.insert(*opt, std::move(vec));
-                            }
-                        }
-                    }
-                }, record[right_col]);
-            }
-
-            // Probe the hash table using records from the left relation.
-            for (auto& left_record : left) {
-                std::visit([&](const auto& key) {
-                    using KeyT = std::decay_t<decltype(key)>;
-                    if constexpr (!std::is_same_v<KeyT, std::monostate>) {
-                        if (auto opt = try_normalize.template operator()<KeyT>(key)) {
-                            std::vector<size_t> found;
-                            if (hash_table.find(*opt, found)) {
-                                for (auto right_idx : found) {
-                                    auto& right_record = right[right_idx];
-                                    std::vector<Data> new_record;
-                                    new_record.reserve(output_attrs.size());
-                                    for (auto [col_idx, _] : output_attrs) {
-                                        if (col_idx < left_record.size())
-                                            new_record.emplace_back(left_record[col_idx]);
-                                        else
-                                            new_record.emplace_back(
-                                                right_record[col_idx - left_record.size()]);
-                                    }
-                                    results.emplace_back(std::move(new_record));
-                                }
-                            }
-                        }
-                    }
-                }, left_record[left_col]);
-            }
-        }
-    }
-};
-
-ExecuteResult execute_hash_join(const Plan&          plan,
-    const JoinNode&     join,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    auto                           left_idx  = join.left;
-    auto                           right_idx = join.right;
-    auto&                          left_node   = plan.nodes[left_idx];
-    auto&                          right_node  = plan.nodes[right_idx];
-    auto&                          left_types  = left_node.output_attrs;
-    auto&                          right_types = right_node.output_attrs;
-    auto                           left       = execute_impl(plan, left_idx);
-    auto                           right      = execute_impl(plan, right_idx);
-    std::vector<std::vector<Data>> results;
-
-    JoinAlgorithm join_algorithm{.build_left = join.build_left,
-        .left                                = left,
-        .right                               = right,
-        .results                             = results,
-        .left_col                            = join.left_attr,
-        .right_col                           = join.right_attr,
-        .output_attrs                        = output_attrs};
-
-    // Instantiate and run the join algorithm based on the column data type.
-    if (join.build_left) {
-        switch (std::get<1>(left_types[join.left_attr])) {
-            case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-            case DataType::INT64:   join_algorithm.run<int64_t>(); break;
-            case DataType::FP64:    join_algorithm.run<double>(); break;
-            case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
-            default: throw std::runtime_error("unsupported join type");
-        }
-    } else {
-        switch (std::get<1>(right_types[join.right_attr])) {
-            case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-            case DataType::INT64:   join_algorithm.run<int64_t>(); break;
-            case DataType::FP64:    join_algorithm.run<double>(); break;
-            case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
-            default: throw std::runtime_error("unsupported join type");
-        }
-    }
-
-    return results;
-}
+ExecuteResult execute_hash_join(const Plan& plan,
+    const JoinNode& join,
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs);
 
 ExecuteResult execute_scan(const Plan& plan,
     const ScanNode& scan,
@@ -207,7 +44,204 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
         node.data);
 }
 
+ColumnarTable build_root_columnar_from_plan(const Plan &plan);
+
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+    // New flow:
+    // If the plan root is a JoinNode we prefer to run the late-materialization
+    // path that keeps VARCHAR columns as PackedStringRef during the join and
+    // only materializes strings at the very end when populating pages.
+    //
+    // For other cases we fallback to the legacy execute_impl -> Table -> to_columnar.
+    return build_root_columnar_from_plan(plan);
+}
+
+void* build_context() {
+    return nullptr;
+}
+
+void destroy_context([[maybe_unused]] void* context) {}
+
+} // namespace Contest
+
+
+/* ---------------------------------------------------------------------------
+ * Helper functions: integrate late_materialization with existing ExecuteResult
+ * -------------------------------------------------------------------------*/
+
+namespace Contest {
+
+// try_extract<T> : attempt to extract a T from the Data variant.
+template <class T>
+static std::optional<T> try_extract(const Data& d) {
+    std::optional<T> out;
+    std::visit([&](auto&& v) {
+        using V = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<V, std::monostate>) {
+            /* leave empty */ ;
+        } else if constexpr (std::is_same_v<V, T>) {
+            out = static_cast<T>(v);
+        } else if constexpr (std::is_arithmetic_v<V> && std::is_arithmetic_v<T>) {
+            out = static_cast<T>(v);
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            if constexpr (std::is_convertible_v<V, std::string_view>) {
+                out = std::string(v);
+            }
+        } else if constexpr (std::is_same_v<T, std::string_view>) {
+            if constexpr (std::is_convertible_v<V, std::string_view>) {
+                out = std::string_view(v);
+            }
+        }
+    }, d);
+    return out;
+}
+
+// Convert ExecuteResult into a Catalog table with one page per column.
+static void build_catalog_from_execute_result(
+    const ExecuteResult &rows,
+    const std::vector<std::tuple<size_t, DataType>> &attrs,
+    Catalog &catalog,
+    uint8_t table_id)
+{
+    Table tab;
+    tab.table_id = table_id;
+    tab.columns.resize(attrs.size());
+
+    size_t nrows = rows.size();
+
+    for (size_t c = 0; c < attrs.size(); ++c) {
+        DataType dtype = std::get<1>(attrs[c]);
+        Column &col = tab.columns[c];
+        col.is_int = (dtype != DataType::VARCHAR);
+
+        if (col.is_int) {
+            IntPage page;
+            page.values.reserve(nrows);
+            for (size_t r = 0; r < nrows; ++r) {
+                const Data &cell = rows[r][c];
+                if (dtype == DataType::INT32) {
+                    auto val = try_extract<int32_t>(cell);
+                    page.values.push_back(val.value_or(0));
+                } else if (dtype == DataType::INT64) {
+                    auto val = try_extract<int64_t>(cell);
+                    page.values.push_back(static_cast<int32_t>(val.value_or(0)));
+                } else if (dtype == DataType::FP64) {
+                    auto val = try_extract<double>(cell);
+                    page.values.push_back(static_cast<int32_t>(val.value_or(0.0)));
+                } else {
+                    page.values.push_back(0);
+                }
+            }
+            col.int_pages.push_back(std::move(page));
+        } else {
+            VarcharPage page;
+            page.values.reserve(nrows);
+            for (size_t r = 0; r < nrows; ++r) {
+                const Data &cell = rows[r][c];
+                auto sval = try_extract<std::string>(cell);
+                page.values.push_back(sval.value_or(std::string()));
+            }
+            col.str_pages.push_back(std::move(page));
+        }
+    }
+
+    catalog.tables.emplace(table_id, std::move(tab));
+}
+
+// Convert ColumnarResult → ColumnarTable (materialize VARCHARs now).
+static ColumnarTable columnar_table_from_columnar_result(
+    const ColumnarResult &res,
+    const std::vector<std::tuple<size_t, DataType>> &output_schema,
+    const Catalog &catalog_for_materialization)
+{
+    ColumnarTable out;
+    out.num_rows = res.num_rows;
+    out.columns.reserve(output_schema.size());
+
+    for (size_t c = 0; c < output_schema.size(); ++c) {
+        DataType dtype = std::get<1>(output_schema[c]);
+        Column col(dtype);
+
+        if (dtype == DataType::INT32) {
+            ColumnInserter<int32_t> ins(col);
+            for (size_t r = 0; r < res.num_rows; ++r)
+                ins.insert(res.int_cols[c][r]);
+            ins.finalize();
+
+        } else if (dtype == DataType::INT64) {
+            ColumnInserter<int64_t> ins(col);
+            for (size_t r = 0; r < res.num_rows; ++r)
+                ins.insert(static_cast<int64_t>(res.int_cols[c][r]));
+            ins.finalize();
+
+        } else if (dtype == DataType::FP64) {
+            ColumnInserter<double> ins(col);
+            for (size_t r = 0; r < res.num_rows; ++r)
+                ins.insert(static_cast<double>(res.int_cols[c][r]));
+            ins.finalize();
+
+        } else { // VARCHAR
+            ColumnInserter<std::string> ins(col);
+            for (size_t r = 0; r < res.num_rows; ++r) {
+                const PackedStringRef &ref = res.str_refs[c][r];
+                std::string s = materialize_string(catalog_for_materialization, ref);
+                ins.insert(s);
+            }
+            ins.finalize();
+        }
+
+        out.columns.push_back(std::move(col));
+    }
+
+    return out;
+}
+
+// Build ColumnarTable for root using late materialization when possible.
+static ColumnarTable build_root_columnar_from_plan(const Plan &plan) {
+    auto &root_node = plan.nodes[plan.root];
+
+    if (std::holds_alternative<JoinNode>(root_node.data)) {
+        const JoinNode &jn = std::get<JoinNode>(root_node.data);
+
+        ExecuteResult left_rows  = execute_impl(plan, jn.left);
+        ExecuteResult right_rows = execute_impl(plan, jn.right);
+
+        auto &left_node  = plan.nodes[jn.left];
+        auto &right_node = plan.nodes[jn.right];
+
+        const auto &left_types  = left_node.output_attrs;
+        const auto &right_types = right_node.output_attrs;
+
+        Catalog catalog;
+        build_catalog_from_execute_result(left_rows, left_types, catalog, 0);
+        build_catalog_from_execute_result(right_rows, right_types, catalog, 1);
+
+        size_t left_cols = left_rows.empty() ? left_types.size() : left_rows[0].size();
+
+        std::vector<uint8_t> outA_cols, outB_cols;
+        for (const auto &attr : root_node.output_attrs) {
+            size_t src_idx = std::get<0>(attr);
+            if (src_idx < left_cols)
+                outA_cols.push_back(uint8_t(src_idx));
+            else
+                outB_cols.push_back(uint8_t(src_idx - left_cols));
+        }
+
+        ColumnarResult cres = direct_hash_join_produce_columnar(
+            catalog,
+            0,
+            uint8_t(jn.left_attr),
+            outA_cols,
+            1,
+            uint8_t(jn.right_attr),
+            outB_cols
+        );
+
+        return columnar_table_from_columnar_result(
+            cres, root_node.output_attrs, catalog
+        );
+    }
+
     namespace views = ranges::views;
     auto ret       = execute_impl(plan, plan.root);
     auto ret_types = plan.nodes[plan.root].output_attrs
@@ -216,11 +250,5 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     Table table{std::move(ret), std::move(ret_types)};
     return table.to_columnar();
 }
-
-void* build_context() {
-    return nullptr;
-}
-
-void destroy_context([[maybe_unused]] void* context) {}
 
 } // namespace Contest
