@@ -81,41 +81,34 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
 endif()
 FetchContent_MakeAvailable(duckdb)
 
-# Include all sources from /src directory. CONFIGURE_DEPENDS can be unreliable.
-# Try re-running cmake in case changes are not recognized.
+# Include all sources from /src directory.
 file(GLOB SIGMODPC_SRC
     CONFIGURE_DEPENDS
     "src/*.cpp"
 )
 
-# Remove any execute_*.cpp files so we don't compile multiple implementations
-file(GLOB SIGMODPC_EXECUTE_FILES
-    CONFIGURE_DEPENDS
-    "src/execute_*.cpp"
-)
-list(REMOVE_ITEM SIGMODPC_SRC ${SIGMODPC_EXECUTE_FILES})
+# ---------------------------------------
+# Remove old executors entirely
+# ---------------------------------------
 
-# Allow choosing which execute implementation to append (default: robinhood)
-set(EXECUTE_IMPL "robinhood" CACHE STRING "Which execute variant: robinhood, hopscotch, cuckoo")
-if(EXECUTE_IMPL STREQUAL "default")
-    set(EXECUTE_FILE "src/execute_default.cpp")
-elseif(EXECUTE_IMPL STREQUAL "robinhood")
-    set(EXECUTE_FILE "src/execute_robinhood.cpp")
-elseif(EXECUTE_IMPL STREQUAL "hopscotch")
-    set(EXECUTE_FILE "src/execute_hopscotch.cpp")
-elseif(EXECUTE_IMPL STREQUAL "cuckoo")
-    set(EXECUTE_FILE "src/execute_cuckoo.cpp")
-else()
-    message(WARNING "Unknown EXECUTE_IMPL '${EXECUTE_IMPL}', executing default implementation.")
-    set(EXECUTE_FILE "src/execute_default.cpp")
-endif()
+# Commenting OUT old executors (kept here but disabled)
+# file(GLOB SIGMODPC_EXECUTE_FILES
+#     CONFIGURE_DEPENDS
+#     "src/execute_*.cpp"
+# )
+# list(REMOVE_ITEM SIGMODPC_SRC ${SIGMODPC_EXECUTE_FILES})
 
-list(APPEND SIGMODPC_SRC ${EXECUTE_FILE})
+# Add ONLY our new unified generic executor
+list(APPEND SIGMODPC_SRC src/executeGeneric.cpp)
+list(APPEND SIGMODPC_SRC src/late_materialization.cpp)
+
+# Explicitly prevent accidental compilation of old executors:
+# list(REMOVE_ITEM SIGMODPC_SRC src/execute_robinhood.cpp)
+# list(REMOVE_ITEM SIGMODPC_SRC src/execute_hopscotch.cpp)
+# list(REMOVE_ITEM SIGMODPC_SRC src/execute_cuckoo.cpp)
+# list(REMOVE_ITEM SIGMODPC_SRC src/execute_default.cpp)
 
 # Enable server-specific compiler optimizations.
-# Use march=native for all but Power servers, which results in the following error:
-#    clang++-18: error: unsupported option '-march=' for target 'powerpc64le-unknown-linux-gnu'
-# This flag works on other Power systems, but for now, we disable march=native on all Power machines.
 if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
     add_compile_options(-march=native)
 endif()
@@ -125,7 +118,7 @@ add_executable(run ${SIGMODPC_SRC} tests/read_sql.cpp)
 add_executable(unit_tests ${SIGMODPC_SRC} tests/unit_tests.cpp)
 add_executable(build_database tests/build_database.cpp)
 
-# For all executables
+# Windows warnings
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(run PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(build_database PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -148,9 +141,7 @@ target_compile_definitions(run PRIVATE TEAMOPT_USE_DUCKDB)
 target_link_libraries(build_database PRIVATE fmt duckdb)
 target_link_libraries(unit_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
 
-# -----------------------------
 # Software Tester
-# -----------------------------
 add_executable(software_tester ${SIGMODPC_SRC} tests/software_tester.cpp)
 target_link_libraries(software_tester PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
 target_compile_definitions(software_tester PRIVATE TEAMOPT_BUILD_CACHE)
