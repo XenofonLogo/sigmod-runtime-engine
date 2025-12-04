@@ -1,6 +1,7 @@
 #include <hardware.h>
 #include <plan.h>
 #include <table.h>
+#include "columnar.h"
 
 #include "unchained_hashtable.h"
 #include "hash_functions.h"
@@ -8,7 +9,7 @@
 
 namespace Contest {
 
-using ExecuteResult = std::vector<std::vector<Data>>;
+using ExecuteResult = ColumnBuffer;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
@@ -21,99 +22,69 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 // -----------------------------------------------------------------------------
 struct JoinAlgorithm {
     bool                                             build_left;
-    ExecuteResult&                                   left;      // build-side = left αν build_left==true
-    ExecuteResult&                                   right;     // probe-side = right αν build_left==true
+    ExecuteResult&                                   left;      // build-side = left if build_left==true
+    ExecuteResult&                                   right;     // probe-side = right if build_left==true
     ExecuteResult&                                   results;
     size_t                                           left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
 
-    // Helper: εξάγει int32 από Data variant. Επιστρέφει true αν υπάρχει έγκυρη τιμή.
-    static bool extract_int32(const Data& d, int32_t& out) {
-        bool ok = false;
-        std::visit([&](const auto& v) {
-            using Vt = std::decay_t<decltype(v)>;
-            if constexpr (std::is_same_v<Vt, int32_t>) {
-                out = v;
-                ok = true;
-            } else {
-                // std::monostate (NULL) ή άλλος τύπος -> not ok
-                ok = false;
-            }
-        }, d);
-        return ok;
-    }
-
-    // Μονοδιάστατο run για INT32 joins
+    // run for INT32 joins using UnchainedHashTable over the columnar buffers
     void run_int32() {
         using Key = int32_t;
-        // Εντοπίζω ποια πλευρά είναι build/probe σε γενικευμένη μορφή
-        ExecuteResult* build_side = build_left ? &left : &right;
-        ExecuteResult* probe_side = build_left ? &right : &left;
+
+        // Which side is build/probe in terms of ColumnBuffer
+        const ColumnBuffer* build_buf = build_left ? &left : &right;
+        const ColumnBuffer* probe_buf = build_left ? &right : &left;
         size_t build_key_col = build_left ? left_col : right_col;
         size_t probe_key_col = build_left ? right_col : left_col;
 
-        // 1) Συλλογή entries (key,rowid) από build_side
+        // gather entries from build side
         std::vector<std::pair<Key, std::size_t>> entries;
-        entries.reserve(build_side->size());
-        for (std::size_t i = 0; i < build_side->size(); ++i) {
-            const auto& record = (*build_side)[i];
-            Key key{};
-            if (extract_int32(record[build_key_col], key)) {
-                entries.emplace_back(key, i);
-            } else {
-                // skip NULLs / non-int32 (per spec joins are INT32-only)
+        entries.reserve(build_buf->num_rows);
+        for (size_t i = 0; i < build_buf->num_rows; ++i) {
+            const auto& v = build_buf->columns[build_key_col].get(i);
+            if (v.type == value_t::Type::I32) {
+                entries.emplace_back(v.u.i32, i);
             }
         }
 
-        // Αν δεν έχουμε entries, τίποτα να κάνουμε
         if (entries.empty()) return;
 
-        // 2) Build unchained hashtable
         UnchainedHashTable<Key> table;
-        table.reserve(entries.size());           // προ-κρατάμε χώρο (βασική βελτιστοποίηση)
+        table.reserve(entries.size());
         table.build_from_entries(entries);
 
-        // 3) Probe: για κάθε tuple στην probe_side ψάχνουμε matches
-        for (const auto& probe_record : *probe_side) {
-            Key probe_key{};
-            if (!extract_int32(probe_record[probe_key_col], probe_key)) continue; // skip NULLs / wrong type
+        // prepare output emitter
+        auto emit_pair = [&](size_t lidx, size_t ridx) {
+            size_t left_cols = left.num_cols();
+            for (size_t col_idx = 0; col_idx < output_attrs.size(); ++col_idx) {
+                size_t src_idx = std::get<0>(output_attrs[col_idx]);
+                if (src_idx < left_cols) results.columns[col_idx].append(left.columns[src_idx].get(lidx));
+                else results.columns[col_idx].append(right.columns[src_idx - left_cols].get(ridx));
+            }
+            ++results.num_rows;
+        };
 
-            std::size_t len = 0;
+        // probe
+        for (size_t j = 0; j < probe_buf->num_rows; ++j) {
+            const auto& vp = probe_buf->columns[probe_key_col].get(j);
+            if (vp.type != value_t::Type::I32) continue;
+            Key probe_key = vp.u.i32;
+            size_t len = 0;
             const auto* base = table.probe(probe_key, len);
             if (!base || len == 0) continue;
-
-            // Σαρώνουμε το candidate range και κάνουμε exact compare
-            for (std::size_t bi = 0; bi < len; ++bi) {
+            for (size_t bi = 0; bi < len; ++bi) {
                 if (base[bi].key != probe_key) continue;
-                // Αν ταιριάζει, φτιάχνουμε το joined record.
-                // build_row_id δείχνει σε index του build_side vector
-                const auto& build_record = (*build_side)[base[bi].row_id];
-                const auto& probe_rec    = probe_record;
-
-                // Επειδή το output_attrs είναι σε όλο το αποτέλεσμα (left + right),
-                // πρέπει να ξέρουμε ποιο είναι το left και ποιο το right στο τελικό output.
-                // Αν build_left==true τότε left==build_side, right==probe_side,
-                // αλλιώς το αντίστροφο.
-                const auto* left_rec_ptr  = build_left ? &build_record : &probe_rec;
-                const auto* right_rec_ptr = build_left ? &probe_rec    : &build_record;
-
-                // Δημιουργία result row σύμφωνα με output_attrs
-                std::vector<Data> new_record;
-                new_record.reserve(output_attrs.size());
-                for (auto [col_idx, _] : output_attrs) {
-                    // Αν το col_idx αναφέρεται στην πλευρά του left (πριν το μέγεθος του left record)
-                    // τότε παίρνουμε από left_rec_ptr, αλλιώς από right_rec_ptr.
-                    if (col_idx < left_rec_ptr->size()) {
-                        new_record.emplace_back((*left_rec_ptr)[col_idx]);
-                    } else {
-                        new_record.emplace_back((*right_rec_ptr)[col_idx - left_rec_ptr->size()]);
-                    }
+                size_t build_row = base[bi].row_id;
+                if (build_left) {
+                    emit_pair(build_row, j);
+                } else {
+                    emit_pair(j, build_row);
                 }
-                results.emplace_back(std::move(new_record));
             }
         }
-    } // run_int32()
-}; // struct JoinAlgorithm
+    }
+};
 
 // -----------------------------------------------------------------------------
 // execute_hash_join / scan / impl / execute
@@ -129,11 +100,13 @@ ExecuteResult execute_hash_join(const Plan&          plan,
     auto& left_types = left_node.output_attrs;
     auto& right_types= right_node.output_attrs;
 
-    // Εκτέλεση υποδέντρων (scan/join) για να πάρουμε materialized rows
+    // execute subtrees to get ColumnBuffers
     auto left  = execute_impl(plan, left_idx);
     auto right = execute_impl(plan, right_idx);
 
-    std::vector<std::vector<Data>> results;
+    ColumnBuffer results(output_attrs.size(), 0);
+    results.types.reserve(output_attrs.size());
+    for (auto &t : output_attrs) results.types.push_back(std::get<1>(t));
 
     JoinAlgorithm join_algorithm{
         .build_left   = join.build_left,
@@ -145,7 +118,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .output_attrs = output_attrs
     };
 
-    // Ελέγχουμε ότι ο τύπος join-στήλης είναι INT32 — σύμφωνο με την εκφώνηση.
+    // INT32-only as before
     if (join.build_left) {
         if (std::get<1>(left_types[join.left_attr]) != DataType::INT32) {
             throw std::runtime_error("Only INT32 join columns are supported in this executor");
@@ -156,7 +129,6 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         }
     }
 
-    // Εδώ καλούμε την απλοποιημένη run_int32() — δεν χρειάζεται template dispatch.
     join_algorithm.run_int32();
 
     return results;
@@ -165,9 +137,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
 ExecuteResult execute_scan(const Plan&               plan,
     const ScanNode&                                  scan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    auto table_id = scan.base_table_id;
-    auto& input   = plan.inputs[table_id];
-    return Table::copy_scan(input, output_attrs);
+    return scan_columnar_to_columnbuffer(plan, scan, output_attrs);
 }
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
@@ -185,13 +155,8 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 }
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-    namespace views = ranges::views;
-    auto ret       = execute_impl(plan, plan.root);
-    auto ret_types = plan.nodes[plan.root].output_attrs
-                   | views::transform([](const auto& v) { return std::get<1>(v); })
-                   | ranges::to<std::vector<DataType>>();
-    Table table{std::move(ret), std::move(ret_types)};
-    return table.to_columnar();
+    auto buf = execute_impl(plan, plan.root);
+    return finalize_columnbuffer_to_columnar(plan, buf, plan.nodes[plan.root].output_attrs);
 }
 
 void* build_context() {

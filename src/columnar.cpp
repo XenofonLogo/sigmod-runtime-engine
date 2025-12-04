@@ -189,23 +189,23 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
         if (build_left_side) {
             for (size_t i = 0; i < left.num_rows; ++i) {
                 const auto& v = left.columns[join.left_attr].get(i);
-                if (v.type == value_t::Type::STR) ht[v.u.ref].push_back(i);
+                    if (v.type == value_t::Type::STR) ht[PackedStringRef::unpack(v.u.ref)].push_back(i);
             }
             for (size_t j = 0; j < right.num_rows; ++j) {
                 const auto& v = right.columns[join.right_attr].get(j);
                 if (v.type != value_t::Type::STR) continue;
-                auto it = ht.find(v.u.ref);
+                    auto it = ht.find(PackedStringRef::unpack(v.u.ref));
                 if (it != ht.end()) for (auto li : it->second) emit_pair(li, j);
             }
         } else {
             for (size_t i = 0; i < right.num_rows; ++i) {
                 const auto& v = right.columns[join.right_attr].get(i);
-                if (v.type == value_t::Type::STR) ht[v.u.ref].push_back(i);
+                    if (v.type == value_t::Type::STR) ht[PackedStringRef::unpack(v.u.ref)].push_back(i);
             }
             for (size_t j = 0; j < left.num_rows; ++j) {
                 const auto& v = left.columns[join.left_attr].get(j);
                 if (v.type != value_t::Type::STR) continue;
-                auto it = ht.find(v.u.ref);
+                    auto it = ht.find(PackedStringRef::unpack(v.u.ref));
                 if (it != ht.end()) for (auto ri : it->second) emit_pair(j, ri);
             }
         }
