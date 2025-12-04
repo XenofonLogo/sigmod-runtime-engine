@@ -1,9 +1,7 @@
+// note: StringRef and value_t are implemented inline in the header
 #include "late_materialization.h"
 #include <iostream>
 #include <utility>
-
-// note: StringRef and value_t are implemented inline in the header
-
 /**********************************************************************
  * Table / Catalog Implementation
  *********************************************************************/
