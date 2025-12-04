@@ -1,179 +1,187 @@
 #pragma once
+
 #include <cstdint>
-#include <vector>
-#include <string>
-#include <unordered_map>
+#include <utility>
+#include <functional>
 
-/*
- * PackedStringRef (64-bit)
- * -------------------------
- * A compact reference to a string stored inside the column-store.
- * Instead of materializing VARCHAR values during scanning or joining,
- * we store only this 64-bit reference. At the end (root operator),
- * the actual string is reconstructed from the original column-store pages.
- *
- * Bit layout (total: 64 bits):
- *   - table_id:  8 bits
- *   - column_id: 8 bits
- *   - page_id:   24 bits
- *   - offset:    20 bits
- *   - flags:      4 bits   (bit0 = is_null, bit1 = is_long_string)
- */
-struct PackedStringRef {
-    uint64_t data;
+namespace Contest {
 
-    static constexpr int TABLE_BITS  = 8;
-    static constexpr int COLUMN_BITS = 8;
-    static constexpr int PAGE_BITS   = 24;
-    static constexpr int OFFSET_BITS = 20;
-    static constexpr int FLAGS_BITS  = 4;
 
-    static PackedStringRef make(uint8_t table_id,
-                                uint8_t column_id,
-                                uint32_t page_id,
-                                uint32_t offset,
-                                bool is_null = false,
-                                bool is_long = false);
 
-    uint8_t  table_id()  const;
-    uint8_t  column_id() const;
-    uint32_t page_id()   const;
-    uint32_t offset()    const;
+// ------------------------------------------------------------
+// StringRef: αναφορά σε string σε columnar σελίδες
+// ------------------------------------------------------------
+struct StringRef {
+    uint16_t table_id;
+    uint8_t  column_id;
+    uint32_t page_id;
+    uint16_t offset;
+    uint16_t length;
 
-    bool is_null() const;
-    bool is_long() const;
+    StringRef() = default;
+
+    StringRef(uint16_t t, uint8_t c, uint32_t p, uint16_t off, uint16_t len)
+        : table_id(t), column_id(c), page_id(p), offset(off), length(len) {}
+
+    // Πακετάρισμα σε 64-bit για χρήση σε hash κλπ
+    std::uint64_t pack() const {
+        std::uint64_t x = 0;
+        x |= static_cast<std::uint64_t>(offset) & 0xFFFFull;             // bits 0-15
+        x |= (static_cast<std::uint64_t>(page_id) & 0xFFFFull) << 16;    // bits 16-31
+        x |= (static_cast<std::uint64_t>(column_id) & 0xFFull) << 32;    // bits 32-39
+        x |= (static_cast<std::uint64_t>(table_id) & 0xFFull) << 40;     // bits 40-47
+        x |= (static_cast<std::uint64_t>(length) & 0xFFFFull) << 48;     // bits 48-63
+        return x;
+    }
+
+    static StringRef unpack(std::uint64_t x) {
+        StringRef r;
+        r.offset    = static_cast<uint16_t>( x        & 0xFFFFu );
+        r.page_id   = static_cast<uint32_t>((x >> 16) & 0xFFFFu );
+        r.column_id = static_cast<uint8_t> ((x >> 32) & 0xFFu   );
+        r.table_id  = static_cast<uint16_t>((x >> 40) & 0xFFu   );
+        r.length    = static_cast<uint16_t>((x >> 48) & 0xFFFFu );
+        return r;
+    }
 };
 
-/*
- * value_t
- * -------
- * A minimal tagged union storing either:
- *   - NULL
- *   - 32-bit integer
- *   - PackedStringRef (compressed VARCHAR reference)
- *
- * This avoids the overhead of std::variant and avoids copying strings
- * during intermediate query execution (late materialization).
- */
+// ------------------------------------------------------------
+// value_t: generic value container
+// ------------------------------------------------------------
 struct value_t {
-    enum Kind : uint8_t {
-        VT_NULL   = 0,
-        VT_INT32  = 1,
-        VT_STRREF = 2
-    } kind;
+    enum class Type : std::uint8_t {
+        I32,
+        I64,
+        FP64,
+        STR,
+        NULLTYPE,
+        // aliases για παλιό κώδικα
+        INT32 = I32,
+        INT64 = I64
+    };
 
-    int32_t  ival;   // used if kind == VT_INT32
-    uint64_t sref;   // raw PackedStringRef bits if kind == VT_STRREF
+    Type type;
 
-    value_t();                          // default = NULL
-    static value_t make_null();
-    static value_t make_int(int32_t x);
-    static value_t make_strref(const PackedStringRef &r);
+    union {
+        std::int32_t i32;
+        std::int64_t i64;
+        double       f64;
+        StringRef    ref;
+        StringRef    sref; // alias ώστε να δουλεύουν και u.ref και u.sref
+    } u;
 
-    bool is_null()   const;
-    bool is_int()    const;
-    bool is_strref() const;
+    value_t() : type(Type::NULLTYPE) {
+        u.i64 = 0;
+    }
 
-    PackedStringRef get_sref() const;
-    int32_t         get_int()  const;
+    // factories που περιμένει το columnar.cpp
+    static value_t make_i32(std::int32_t v) {
+        value_t r;
+        r.type = Type::I32;
+        r.u.i32 = v;
+        return r;
+    }
+
+    static value_t make_i64(std::int64_t v) {
+        value_t r;
+        r.type = Type::I64;
+        r.u.i64 = v;
+        return r;
+    }
+
+    static value_t make_f64(double v) {
+        value_t r;
+        r.type = Type::FP64;
+        r.u.f64 = v;
+        return r;
+    }
+
+    static value_t make_str(const StringRef& rref) {
+        value_t r;
+        r.type = Type::STR;
+        r.u.ref = rref;
+        r.u.sref = rref;
+        return r;
+    }
+
+    static value_t make_null() {
+        return value_t();
+    }
+
+    // factories που χρησιμοποιούν τα tests (from_int, from_stringref)
+    static value_t from_int(std::int64_t v) {
+        // αρκεί 32-bit για τα tests
+        return make_i32(static_cast<std::int32_t>(v));
+    }
+
+    static value_t from_stringref(const StringRef& rref) {
+        return make_str(rref);
+    }
+
+    // helpers που χρησιμοποιούν τα tests
+    bool is_int() const {
+        return type == Type::I32 || type == Type::I64;
+    }
+
+    bool is_stringref() const {
+        return type == Type::STR;
+    }
+
+    bool is_null() const {
+        return type == Type::NULLTYPE;
+    }
 };
 
-/*
- * Minimal in-memory representations for demonstration:
- * -----------------------------------------------------
- * These structures simulate a column-store:
- *   - VarcharPage: actual strings
- *   - IntPage: actual integers
- *   - Column: either VARCHAR or INT
- *   - Table: a set of columns and pages
- *   - Catalog: a lookup of tables by table_id
- *
- * Replace these with your real storage structures
- * when integrating into the project.
- */
+// ------------------------------------------------------------
+// Hash / equality για StringRef σε unordered_map
+// ------------------------------------------------------------
+struct StringRefHash {
+    const Plan* plan; // δεν το χρειαζόμαστε εδώ, αλλά το columnar.cpp περνάει &plan
 
-struct VarcharPage {
-    std::vector<std::string> values;
+    explicit StringRefHash(const Plan* p) : plan(p) {}
+
+    std::size_t operator()(const StringRef& r) const noexcept {
+        std::uint64_t x = r.pack();
+        return std::hash<std::uint64_t>{}(x);
+    }
 };
 
-struct IntPage {
-    std::vector<int32_t> values;
+struct StringRefEq {
+    const Plan* plan;
+
+    explicit StringRefEq(const Plan* p) : plan(p) {}
+
+    bool operator()(const StringRef& a, const StringRef& b) const noexcept {
+        return a.table_id  == b.table_id  &&
+               a.column_id == b.column_id &&
+               a.page_id   == b.page_id   &&
+               a.offset    == b.offset    &&
+               a.length    == b.length;
+    }
 };
 
-struct Column {
-    bool is_int;
-    std::vector<IntPage> int_pages;
-    std::vector<VarcharPage> str_pages;
+// ------------------------------------------------------------
+// StringRefResolver: βρίσκει pointer+length από ColumnarTable
+// ------------------------------------------------------------
+struct StringRefResolver {
+    const Plan* plan;
+
+    explicit StringRefResolver(const Plan* p) : plan(p) {}
+
+    std::pair<const char*, unsigned int>
+    resolve(const StringRef& ref, const ColumnarTable& table) const;
 };
 
-struct Table {
-    uint8_t table_id;
-    std::vector<Column> columns;
+// inline υλοποίηση για να λινκάρει παντού
+inline std::pair<const char*, unsigned int>
+StringRefResolver::resolve(const StringRef& ref, const ColumnarTable& table) const {
+    // Υποθέτουμε ότι το ColumnarTable έχει:
+    // table.columns[ column_id ].pages[ page_id ] -> Page*
+    // και ότι Page έχει std::vector<char> data;
+    const auto& col = table.columns[ref.column_id];
+    auto pg = col.pages[ref.page_id];       // Page* const
+    const char* ptr = pg->data.data() + ref.offset;
+    return { ptr, ref.length };
+}
 
-    size_t num_rows() const;
-};
-
-struct Catalog {
-    std::unordered_map<uint8_t, Table> tables;
-};
-
-/*
- * Scanning
- * --------
- * Returns a row-store (vector of rows), where each cell is a value_t.
- * INT32 columns are materialized immediately.
- * VARCHAR columns store only PackedStringRef.
- */
-std::vector<std::vector<value_t>>
-scan_to_rowstore(Catalog &catalog,
-                 uint8_t table_id,
-                 const std::vector<uint8_t> &col_ids);
-
-/*
- * ColumnarResult
- * --------------
- * A simple structure representing columnar output.
- * Can either:
- *   - materialize string columns (method 1), or
- *   - keep PackedStringRef until consumption (method 2).
- */
-struct ColumnarResult {
-    std::vector<bool>           is_int_col;
-    std::vector<std::vector<int32_t>>           int_cols;
-    std::vector<std::vector<std::string>>       str_cols;   // materialized strings
-    std::vector<std::vector<PackedStringRef>>   str_refs;   // late materialization
-    size_t num_rows = 0;
-};
-
-/*
- * materialize_string()
- * --------------------
- * Converts a PackedStringRef back into a full string
- * by accessing the original column-store pages.
- */
-std::string materialize_string(const Catalog &catalog,
-                               const PackedStringRef &r);
-
-/*
- * convert_rowstore_to_columnar()
- * ------------------------------
- * Method 1 (slow, for debugging):
- * Materializes all strings and produces a final columnar result.
- */
-ColumnarResult convert_rowstore_to_columnar(
-    const Catalog &catalog,
-    const std::vector<std::vector<value_t>> &rows);
-
-/*
- * direct_hash_join_produce_columnar()
- * -----------------------------------
- * Method 2 (real required solution):
- * Produces a ColumnarTable directly during join execution,
- * WITHOUT ever materializing strings in intermediate steps.
- */
-ColumnarResult direct_hash_join_produce_columnar(
-    Catalog &catalog,
-    uint8_t tableA, uint8_t keyA_col,
-    const std::vector<uint8_t> &outputA_cols,
-    uint8_t tableB, uint8_t keyB_col,
-    const std::vector<uint8_t> &outputB_cols);
+} // namespace Contest

@@ -14,7 +14,7 @@
 // A small, standalone hashing quality tester.
 // It checks collision rate, bucket distribution uniformity (chi-sq-like),
 // and a simple avalanche test for std::hash on a few common key types.
-// test vaggelis2
+
 static std::mt19937_64 rng(123456789);
 
 static size_t hamming_distance(size_t a, size_t b)
@@ -883,7 +883,7 @@ TEST_CASE("LateMat: INT32 + VARCHAR", "[late][mixed]")
     tbl.num_rows = ints.size();
 
     Plan plan;
-    plan.inputs.push_back(tbl);
+    plan.inputs.emplace_back(std::move(tbl));
     size_t s = plan.new_scan_node(0, {{0, DataType::INT32},
                                       {1, DataType::VARCHAR}});
     plan.root = s;
@@ -920,7 +920,7 @@ TEST_CASE("LateMat: NULL varchar", "[late][null]")
     tbl.num_rows = 3;
 
     Plan plan;
-    plan.inputs.push_back(tbl);
+    plan.inputs.emplace_back(std::move(tbl));
     size_t s = plan.new_scan_node(0, {{0, DataType::VARCHAR}});
     plan.root = s;
 
