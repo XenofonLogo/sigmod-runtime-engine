@@ -205,3 +205,42 @@ Large scale test (100k tuples)
 
 
 
+/* PART 1 */
+# Late Materialization (LM) – Αναλυτική Τεκμηρίωση
+
+Το Late Materialization (LM) είναι τεχνική εκτέλεσης ερωτημάτων που επιτρέπει στο σύστημα να *μην υλοποιεί* (materialize) ακριβές τιμές τύπου `VARCHAR` μέχρι να χρειαστεί πραγματικά.  
+Αντί να αντιγράφονται strings κατά τη διάρκεια των scans και joins, το σύστημα χρησιμοποιεί compact references (`PackedStringRef` / `StringRef`).
+Αυτό μειώνει την κατανάλωση μνήμης και βελτιώνει σημαντικά την απόδοση.
+
+# Βασική Ιδέα
+
+# INT32 τιμές → Υλοποιούνται άμεσα  
+# VARCHAR τιμές → *ΔΕΝ υλοποιούνται*
+
+Αντί για string, αποθηκεύεται μία 64-bit packed αναφορά που περιλαμβάνει:
+- table_id  
+- column_id  
+- page_id  
+- offset  
+- flags (null, long-string)
+
+Η πραγματική συμβολοσειρά ανασύρεται μόνο στην τελική φάση.
+
+#  Δομές LM
+## LM_Table
+Αναπαριστά έναν πίνακα σε column-store μορφή.  
+Έχει πολλές στήλες (`LM_Column`), κάθε μία με πολλές σελίδες (pages).
+
+## LM_Column
+- `is_int = true` → `int_pages`  
+- `is_int = false` → `str_pages`
+
+## LM_IntPage / LM_VarcharPage
+Αποθηκεύουν πραγματικές τιμές:
+- `std::vector<int32_t>`
+- `std::vector<std::string>`
+
+# Scanning: `scan_to_rowstore()`
+Η συνάρτηση:
+scan_to_rowstore(Catalog&, table_id, col_ids)
+
