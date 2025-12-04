@@ -1,116 +1,15 @@
+// note: StringRef and value_t are implemented inline in the header
 #include "late_materialization.h"
 #include <iostream>
 #include <utility>
-
-/**********************************************************************
- * PackedStringRef Implementation
- *********************************************************************/
-
-PackedStringRef PackedStringRef::make(uint8_t table_id,
-                                      uint8_t column_id,
-                                      uint32_t page_id,
-                                      uint32_t offset,
-                                      bool is_null,
-                                      bool is_long)
-{
-    uint64_t d = 0;
-    uint64_t pos = 0;
-
-    // offset (20 bits)
-    d |= (uint64_t)(offset & ((1u << OFFSET_BITS) - 1)) << pos;
-    pos += OFFSET_BITS;
-
-    // page_id (24 bits)
-    d |= (uint64_t)(page_id & ((1u << PAGE_BITS) - 1)) << pos;
-    pos += PAGE_BITS;
-
-    // column_id (8 bits)
-    d |= (uint64_t)(column_id & ((1u << COLUMN_BITS) - 1)) << pos;
-    pos += COLUMN_BITS;
-
-    // table_id (8 bits)
-    d |= (uint64_t)(table_id & ((1u << TABLE_BITS) - 1)) << pos;
-    pos += TABLE_BITS;
-
-    // flags (4 bits)
-    uint8_t flags = (is_null ? 1 : 0) | (is_long ? 2 : 0);
-    d |= (uint64_t)(flags & ((1u << FLAGS_BITS) - 1)) << pos;
-
-    return PackedStringRef{d};
-}
-
-uint8_t PackedStringRef::table_id() const {
-    return (data >> (OFFSET_BITS + PAGE_BITS + COLUMN_BITS)) & ((1u << TABLE_BITS) - 1);
-}
-
-uint8_t PackedStringRef::column_id() const {
-    return (data >> (OFFSET_BITS + PAGE_BITS)) & ((1u << COLUMN_BITS) - 1);
-}
-
-uint32_t PackedStringRef::page_id() const {
-    return (uint32_t)((data >> OFFSET_BITS) & ((1ull << PAGE_BITS) - 1));
-}
-
-uint32_t PackedStringRef::offset() const {
-    return (uint32_t)(data & ((1ull << OFFSET_BITS) - 1));
-}
-
-bool PackedStringRef::is_null() const {
-    uint64_t pos = OFFSET_BITS + PAGE_BITS + COLUMN_BITS + TABLE_BITS;
-    return ((data >> pos) & 1ull) != 0;
-}
-
-bool PackedStringRef::is_long() const {
-    uint64_t pos = OFFSET_BITS + PAGE_BITS + COLUMN_BITS + TABLE_BITS;
-    return ((data >> (pos + 1)) & 1ull) != 0;
-}
-
-/**********************************************************************
- * value_t Implementation
- *********************************************************************/
-
-value_t::value_t() : kind(VT_NULL), ival(0), sref(0) {}
-
-value_t value_t::make_null() {
-    value_t v;
-    v.kind = VT_NULL;
-    return v;
-}
-
-value_t value_t::make_int(int32_t x) {
-    value_t v;
-    v.kind = VT_INT32;
-    v.ival = x;
-    return v;
-}
-
-value_t value_t::make_strref(const PackedStringRef &r) {
-    value_t v;
-    v.kind = VT_STRREF;
-    v.sref = r.data;
-    return v;
-}
-
-bool value_t::is_null() const { return kind == VT_NULL; }
-bool value_t::is_int() const  { return kind == VT_INT32; }
-bool value_t::is_strref() const { return kind == VT_STRREF; }
-
-PackedStringRef value_t::get_sref() const {
-    return PackedStringRef{sref};
-}
-
-int32_t value_t::get_int() const {
-    return ival;
-}
-
 /**********************************************************************
  * Table / Catalog Implementation
  *********************************************************************/
 
-size_t Table::num_rows() const {
+size_t LM_Table::num_rows() const {
     if (columns.empty()) return 0;
 
-    const Column &c = columns[0];
+    const LM_Column &c = columns[0];
 
     if (c.is_int) {
         size_t total = 0;
@@ -138,7 +37,7 @@ scan_to_rowstore(Catalog &catalog,
     if (it == catalog.tables.end())
         return {};
 
-    Table &tbl = it->second;
+    LM_Table &tbl = it->second;
     size_t row_count = tbl.num_rows();
 
     std::vector<std::vector<value_t>> rows(
@@ -149,7 +48,7 @@ scan_to_rowstore(Catalog &catalog,
     // For every requested column, fill each row.
     for (size_t col_idx = 0; col_idx < col_ids.size(); ++col_idx) {
         uint8_t col_id = col_ids[col_idx];
-        Column &col = tbl.columns[col_id];
+        LM_Column &col = tbl.columns[col_id];
 
         size_t row_id = 0;
 
@@ -193,12 +92,11 @@ std::string materialize_string(const Catalog &catalog,
     if (it == catalog.tables.end())
         return "";
 
-    const Table &tbl = it->second;
+    const LM_Table &tbl = it->second;
     uint8_t col_id = r.column_id();
     if (col_id >= tbl.columns.size())
         return "";
-
-    const Column &col = tbl.columns[col_id];
+    const LM_Column &col = tbl.columns[col_id];
     if (col.is_int)
         return "";   // invalid but safe
 
