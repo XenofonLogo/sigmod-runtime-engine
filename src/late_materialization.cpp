@@ -1,22 +1,25 @@
-// note: StringRef and value_t are implemented inline in the header
 #include "late_materialization.h"
 #include <iostream>
 #include <utility>
-/**********************************************************************
- * Table / Catalog Implementation
- *********************************************************************/
 
-size_t LM_Table::num_rows() const {
-    if (columns.empty()) return 0;
+/*Table / Catalog Implementation*/
+
+size_t LM_Table::num_rows() const
+{
+    if (columns.empty())
+        return 0;
 
     const LM_Column &c = columns[0];
 
-    if (c.is_int) {
+    if (c.is_int)
+    {
         size_t total = 0;
         for (const auto &pg : c.int_pages)
             total += pg.values.size();
         return total;
-    } else {
+    }
+    else
+    {
         size_t total = 0;
         for (const auto &pg : c.str_pages)
             total += pg.values.size();
@@ -24,9 +27,7 @@ size_t LM_Table::num_rows() const {
     }
 }
 
-/**********************************************************************
- * Scanning (producing row-store of value_t)
- *********************************************************************/
+/* Scanning (producing row-store of value_t)*/
 
 std::vector<std::vector<value_t>>
 scan_to_rowstore(Catalog &catalog,
@@ -42,32 +43,38 @@ scan_to_rowstore(Catalog &catalog,
 
     std::vector<std::vector<value_t>> rows(
         row_count,
-        std::vector<value_t>(col_ids.size(), value_t::make_null())
-    );
+        std::vector<value_t>(col_ids.size(), value_t::make_null()));
 
     // For every requested column, fill each row.
-    for (size_t col_idx = 0; col_idx < col_ids.size(); ++col_idx) {
+    for (size_t col_idx = 0; col_idx < col_ids.size(); ++col_idx)
+    {
         uint8_t col_id = col_ids[col_idx];
         LM_Column &col = tbl.columns[col_id];
 
         size_t row_id = 0;
 
-        if (col.is_int) {
+        if (col.is_int)
+        {
             // Materialize all integers immediately.
-            for (auto &page : col.int_pages) {
-                for (int32_t val : page.values) {
+            for (auto &page : col.int_pages)
+            {
+                for (int32_t val : page.values)
+                {
                     rows[row_id][col_idx] = value_t::make_int(val);
                     row_id++;
                 }
             }
-        } else {
+        }
+        else
+        {
             // VARCHAR: do NOT materialize string; store PackedStringRef.
-            for (uint32_t p = 0; p < col.str_pages.size(); ++p) {
+            for (uint32_t p = 0; p < col.str_pages.size(); ++p)
+            {
                 auto &page = col.str_pages[p];
-                for (uint32_t off = 0; off < page.values.size(); ++off) {
+                for (uint32_t off = 0; off < page.values.size(); ++off)
+                {
                     PackedStringRef ref = PackedStringRef::make(
-                        table_id, col_id, p, off, false, false
-                    );
+                        table_id, col_id, p, off, false, false);
                     rows[row_id][col_idx] = value_t::make_strref(ref);
                     row_id++;
                 }
@@ -78,10 +85,7 @@ scan_to_rowstore(Catalog &catalog,
     return rows;
 }
 
-/**********************************************************************
- * Helper: Materialize a PackedStringRef back to actual VARCHAR
- *********************************************************************/
-
+/* Helper: Materialize a PackedStringRef back to actual VARCHAR */
 std::string materialize_string(const Catalog &catalog,
                                const PackedStringRef &r)
 {
@@ -98,29 +102,28 @@ std::string materialize_string(const Catalog &catalog,
         return "";
     const LM_Column &col = tbl.columns[col_id];
     if (col.is_int)
-        return "";   // invalid but safe
+        return ""; // invalid but safe
 
     uint32_t pg = r.page_id();
     uint32_t off = r.offset();
 
-    if (pg >= col.str_pages.size()) return "";
+    if (pg >= col.str_pages.size())
+        return "";
     const auto &page = col.str_pages[pg];
 
-    if (off >= page.values.size()) return "";
+    if (off >= page.values.size())
+        return "";
     return page.values[off];
 }
 
-/**********************************************************************
- * Method 1:
- * Convert row-store (value_t) to columnar result (materializing strings)
- *********************************************************************/
-
+/* Method 1: Convert row-store (value_t) to columnar result (materializing strings)*/
 ColumnarResult convert_rowstore_to_columnar(
     const Catalog &catalog,
     const std::vector<std::vector<value_t>> &rows)
 {
     ColumnarResult res;
-    if (rows.empty()) return res;
+    if (rows.empty())
+        return res;
 
     size_t cols = rows[0].size();
     size_t nrows = rows.size();
@@ -135,7 +138,8 @@ ColumnarResult convert_rowstore_to_columnar(
         res.is_int_col[c] = rows[0][c].is_int();
 
     // Reserve capacity.
-    for (size_t c = 0; c < cols; ++c) {
+    for (size_t c = 0; c < cols; ++c)
+    {
         if (res.is_int_col[c])
             res.int_cols[c].reserve(nrows);
         else
@@ -143,16 +147,22 @@ ColumnarResult convert_rowstore_to_columnar(
     }
 
     // Fill columns.
-    for (size_t r = 0; r < nrows; ++r) {
-        for (size_t c = 0; c < cols; ++c) {
+    for (size_t r = 0; r < nrows; ++r)
+    {
+        for (size_t c = 0; c < cols; ++c)
+        {
             const value_t &v = rows[r][c];
-            if (v.is_int()) {
+            if (v.is_int())
+            {
                 res.int_cols[c].push_back(v.get_int());
-            } else if (v.is_strref()) {
+            }
+            else if (v.is_strref())
+            {
                 res.str_cols[c].push_back(
-                    materialize_string(catalog, v.get_sref())
-                );
-            } else {
+                    materialize_string(catalog, v.get_sref()));
+            }
+            else
+            {
                 // NULL
                 if (res.is_int_col[c])
                     res.int_cols[c].push_back(0);
@@ -165,10 +175,7 @@ ColumnarResult convert_rowstore_to_columnar(
     return res;
 }
 
-/**********************************************************************
- * Method 2:
- * Direct hash join producing a columnar result without materializing strings
- *********************************************************************/
+/* Method 2: Direct hash join producing a columnar result without materializing strings */
 
 ColumnarResult direct_hash_join_produce_columnar(
     Catalog &catalog,
@@ -183,7 +190,8 @@ ColumnarResult direct_hash_join_produce_columnar(
     std::unordered_map<int32_t, std::vector<size_t>> build_map;
     build_map.reserve(Akey_rows.size());
 
-    for (size_t r = 0; r < Akey_rows.size(); ++r) {
+    for (size_t r = 0; r < Akey_rows.size(); ++r)
+    {
         const value_t &v = Akey_rows[r][0];
         if (v.is_int())
             build_map[v.get_int()].push_back(r);
@@ -216,27 +224,31 @@ ColumnarResult direct_hash_join_produce_columnar(
     res.str_refs.resize(total_cols);
 
     // Probe phase.
-    for (size_t rb = 0; rb < B_out.size(); ++rb) {
+    for (size_t rb = 0; rb < B_out.size(); ++rb)
+    {
         const value_t &vkey = B_out[rb][0];
-        if (!vkey.is_int()) continue;
+        if (!vkey.is_int())
+            continue;
 
         int32_t key = vkey.get_int();
         auto hit = build_map.find(key);
-        if (hit == build_map.end()) continue;
+        if (hit == build_map.end())
+            continue;
 
-        for (size_t ra : hit->second) {
-
+        for (size_t ra : hit->second)
+        {
             // Append A columns.
-            for (size_t c = 0; c < nA; ++c) {
+            for (size_t c = 0; c < nA; ++c)
+            {
                 const value_t &v = A_out[ra][c];
                 if (res.is_int_col[c])
                     res.int_cols[c].push_back(v.get_int());
                 else
                     res.str_refs[c].push_back(v.get_sref());
             }
-
             // Append B columns.
-            for (size_t c = 0; c < nB; ++c) {
+            for (size_t c = 0; c < nB; ++c)
+            {
                 size_t outc = nA + c;
                 const value_t &v = B_out[rb][c];
                 if (res.is_int_col[outc])
@@ -244,10 +256,8 @@ ColumnarResult direct_hash_join_produce_columnar(
                 else
                     res.str_refs[outc].push_back(v.get_sref());
             }
-
             res.num_rows++;
         }
     }
-
     return res;
 }
