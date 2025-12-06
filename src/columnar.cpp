@@ -1,112 +1,25 @@
-#include "columnar.h"
 
+     #include "columnar.h"
+#include "late_materialization.h"
 #include <cstring>
 #include <algorithm>
 #include <unordered_map>
 
 namespace Contest {
 
-static inline bool get_bitmap_local_col(const uint8_t* bitmap, uint16_t idx) {
-    auto byte_idx = idx / 8;
-    auto bit = idx % 8;
-    return bitmap[byte_idx] & (1u << bit);
-}
+// H get_bitmap_local_col αφαιρέθηκε από εδώ επειδή μετακινήθηκε στο columnar.h
 
-ColumnBuffer scan_columnar_to_columnbuffer(const Plan& plan,
-    const ScanNode& scan,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    auto table_id = scan.base_table_id;
-    const auto& input = plan.inputs[table_id];
-    
-    ColumnBuffer buf(output_attrs.size(), input.num_rows);
-    buf.types.reserve(output_attrs.size());
-    for (auto& t : output_attrs) buf.types.push_back(std::get<1>(t));
+// Οι scan_columnar_to_columnbuffer και finalize_columnbuffer_to_columnar
+// αφαιρέθηκαν από εδώ επειδή μετακινήθηκαν στο late_materialization.cpp
 
-    for (size_t col_idx = 0; col_idx < output_attrs.size(); ++col_idx) {
-        size_t in_col_idx = std::get<0>(output_attrs[col_idx]);
-        auto& column = input.columns[in_col_idx];
-        auto& out_col = buf.columns[col_idx];
-
-        for (size_t page_idx = 0; page_idx < column.pages.size(); ++page_idx) {
-            auto* page = column.pages[page_idx]->data;
-            switch (column.type) {
-            case DataType::INT32: {
-                uint16_t num_rows = *reinterpret_cast<uint16_t*>(page);
-                auto* data_begin = reinterpret_cast<int32_t*>(page + 4);
-                auto* bitmap = reinterpret_cast<uint8_t*>(page + PAGE_SIZE - (num_rows + 7) / 8);
-                uint16_t data_idx = 0;
-                for (uint16_t i = 0; i < num_rows; ++i) {
-                    if (get_bitmap_local_col(bitmap, i)) {
-                        out_col.append(value_t::make_i32(data_begin[data_idx++]));
-                    } else {
-                        out_col.append(value_t());
-                    }
-                }
-                break;
-            }
-            case DataType::INT64: {
-                uint16_t num_rows = *reinterpret_cast<uint16_t*>(page);
-                auto* data_begin = reinterpret_cast<int64_t*>(page + 8);
-                auto* bitmap = reinterpret_cast<uint8_t*>(page + PAGE_SIZE - (num_rows + 7) / 8);
-                uint16_t data_idx = 0;
-                for (uint16_t i = 0; i < num_rows; ++i) {
-                    if (get_bitmap_local_col(bitmap, i)) {
-                        out_col.append(value_t::make_i64(data_begin[data_idx++]));
-                    } else {
-                        out_col.append(value_t());
-                    }
-                }
-                break;
-            }
-            case DataType::FP64: {
-                uint16_t num_rows = *reinterpret_cast<uint16_t*>(page);
-                auto* data_begin = reinterpret_cast<double*>(page + 8);
-                auto* bitmap = reinterpret_cast<uint8_t*>(page + PAGE_SIZE - (num_rows + 7) / 8);
-                uint16_t data_idx = 0;
-                for (uint16_t i = 0; i < num_rows; ++i) {
-                    if (get_bitmap_local_col(bitmap, i)) {
-                        out_col.append(value_t::make_f64(data_begin[data_idx++]));
-                    } else {
-                        out_col.append(value_t());
-                    }
-                }
-                break;
-            }
-            case DataType::VARCHAR: {
-                uint16_t num_rows = *reinterpret_cast<uint16_t*>(page);
-                if (num_rows == 0xffff) {
-                    out_col.append(value_t::make_str(StringRef(static_cast<uint16_t>(table_id), 
-                        static_cast<uint8_t>(in_col_idx), static_cast<uint32_t>(page_idx), 0xffff)));
-                } else if (num_rows == 0xfffe) {
-                    out_col.append(value_t());
-                } else {
-                    uint16_t num_non_null = *reinterpret_cast<uint16_t*>(page + 2);
-                    auto* bitmap = reinterpret_cast<uint8_t*>(page + PAGE_SIZE - (num_rows + 7) / 8);
-                    uint16_t data_idx = 0;
-                    for (uint16_t i = 0; i < num_rows; ++i) {
-                        if (get_bitmap_local_col(bitmap, i)) {
-                            out_col.append(value_t::make_str(StringRef(static_cast<uint16_t>(table_id), 
-                                static_cast<uint8_t>(in_col_idx), static_cast<uint32_t>(page_idx), data_idx)));
-                            ++data_idx;
-                        } else {
-                            out_col.append(value_t());
-                        }
-                    }
-                }
-                break;
-            }
-            }
-        }
-    }
-
-    return buf;
-}
-
+// Υλοποίηση μόνο της join_columnbuffer_hash (αν χρειάζεται για tests ή legacy code)
+// Ενημερωμένη για να συμβαδίζει με το νέο value_t
 ColumnBuffer join_columnbuffer_hash(const Plan& plan,
     const JoinNode& join,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs,
     const ColumnBuffer& left,
     const ColumnBuffer& right) {
+    
     ColumnBuffer out(output_attrs.size(), 0);
     out.types.reserve(output_attrs.size());
     for (auto& t : output_attrs) out.types.push_back(std::get<1>(t));
@@ -124,95 +37,86 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
     auto join_numeric = [&](auto tag, bool build_left_side) {
         using T = decltype(tag);
         std::unordered_map<T, std::vector<size_t>> ht;
-        if (build_left_side) {
-            for (size_t i = 0; i < left.num_rows; ++i) {
-                const auto& v = left.columns[join.left_attr].get(i);
-                if constexpr (std::is_same_v<T, int32_t>) {
-                    if (v.type == value_t::Type::I32) ht[v.u.i32].push_back(i);
-                } else if constexpr (std::is_same_v<T, int64_t>) {
-                    if (v.type == value_t::Type::I64) ht[v.u.i64].push_back(i);
-                } else if constexpr (std::is_same_v<T, double>) {
-                    if (v.type == value_t::Type::FP64) ht[v.u.f64].push_back(i);
-                }
+        
+        // Build
+        const ColumnBuffer& build_buf = build_left_side ? left : right;
+        size_t build_key_idx = build_left_side ? join.left_attr : join.right_attr;
+        
+        for (size_t i = 0; i < build_buf.num_rows; ++i) {
+            const auto& v = build_buf.columns[build_key_idx].get(i);
+            if constexpr (std::is_same_v<T, int32_t>) {
+                if (v.type == value_t::Type::I32) ht[v.u.i32].push_back(i);
+            } else if constexpr (std::is_same_v<T, int64_t>) {
+                if (v.type == value_t::Type::I64) ht[v.u.i64].push_back(i);
+            } else if constexpr (std::is_same_v<T, double>) {
+                if (v.type == value_t::Type::FP64) ht[v.u.f64].push_back(i);
             }
-            for (size_t j = 0; j < right.num_rows; ++j) {
-                const auto& v = right.columns[join.right_attr].get(j);
-                if constexpr (std::is_same_v<T, int32_t>) {
-                    if (v.type != value_t::Type::I32) continue;
-                    auto it = ht.find(v.u.i32);
-                    if (it != ht.end()) for (auto li : it->second) emit_pair(li, j);
-                } else if constexpr (std::is_same_v<T, int64_t>) {
-                    if (v.type != value_t::Type::I64) continue;
-                    auto it = ht.find(v.u.i64);
-                    if (it != ht.end()) for (auto li : it->second) emit_pair(li, j);
-                } else if constexpr (std::is_same_v<T, double>) {
-                    if (v.type != value_t::Type::FP64) continue;
-                    auto it = ht.find(v.u.f64);
-                    if (it != ht.end()) for (auto li : it->second) emit_pair(li, j);
-                }
+        }
+
+        // Probe
+        const ColumnBuffer& probe_buf = build_left_side ? right : left;
+        size_t probe_key_idx = build_left_side ? join.right_attr : join.left_attr;
+
+        for (size_t j = 0; j < probe_buf.num_rows; ++j) {
+            const auto& v = probe_buf.columns[probe_key_idx].get(j);
+            bool match = false;
+            typename std::unordered_map<T, std::vector<size_t>>::iterator it;
+
+            if constexpr (std::is_same_v<T, int32_t>) {
+                if (v.type == value_t::Type::I32) { match = true; it = ht.find(v.u.i32); }
+            } else if constexpr (std::is_same_v<T, int64_t>) {
+                if (v.type == value_t::Type::I64) { match = true; it = ht.find(v.u.i64); }
+            } else if constexpr (std::is_same_v<T, double>) {
+                if (v.type == value_t::Type::FP64) { match = true; it = ht.find(v.u.f64); }
             }
-        } else {
-            for (size_t i = 0; i < right.num_rows; ++i) {
-                const auto& v = right.columns[join.right_attr].get(i);
-                if constexpr (std::is_same_v<T, int32_t>) {
-                    if (v.type == value_t::Type::I32) ht[v.u.i32].push_back(i);
-                } else if constexpr (std::is_same_v<T, int64_t>) {
-                    if (v.type == value_t::Type::I64) ht[v.u.i64].push_back(i);
-                } else if constexpr (std::is_same_v<T, double>) {
-                    if (v.type == value_t::Type::FP64) ht[v.u.f64].push_back(i);
-                }
-            }
-            for (size_t j = 0; j < left.num_rows; ++j) {
-                const auto& v = left.columns[join.left_attr].get(j);
-                if constexpr (std::is_same_v<T, int32_t>) {
-                    if (v.type != value_t::Type::I32) continue;
-                    auto it = ht.find(v.u.i32);
-                    if (it != ht.end()) for (auto ri : it->second) emit_pair(j, ri);
-                } else if constexpr (std::is_same_v<T, int64_t>) {
-                    if (v.type != value_t::Type::I64) continue;
-                    auto it = ht.find(v.u.i64);
-                    if (it != ht.end()) for (auto ri : it->second) emit_pair(j, ri);
-                } else if constexpr (std::is_same_v<T, double>) {
-                    if (v.type != value_t::Type::FP64) continue;
-                    auto it = ht.find(v.u.f64);
-                    if (it != ht.end()) for (auto ri : it->second) emit_pair(j, ri);
+
+            if (match && it != ht.end()) {
+                for (auto build_idx : it->second) {
+                    if (build_left_side) emit_pair(build_idx, j);
+                    else emit_pair(j, build_idx);
                 }
             }
         }
     };
 
     auto join_varchar = [&](bool build_left_side) {
-        using Key = StringRef;
-        StringRefHash hasher(&plan);
-        StringRefEq eq(&plan);
-        std::unordered_map<Key, std::vector<size_t>, StringRefHash, StringRefEq> ht(1024, hasher, eq);
-        if (build_left_side) {
-            for (size_t i = 0; i < left.num_rows; ++i) {
-                const auto& v = left.columns[join.left_attr].get(i);
-                    if (v.type == value_t::Type::STR) ht[PackedStringRef::unpack(v.u.ref)].push_back(i);
+        using Key = Contest::StringRef; // Use the typedef from late_materialization.h
+        Contest::StringRefHash hasher(&plan);
+        Contest::StringRefEq eq(&plan);
+        std::unordered_map<Key, std::vector<size_t>, Contest::StringRefHash, Contest::StringRefEq> ht(1024, hasher, eq);
+        
+        // Build
+        const ColumnBuffer& build_buf = build_left_side ? left : right;
+        size_t build_key_idx = build_left_side ? join.left_attr : join.right_attr;
+
+        for (size_t i = 0; i < build_buf.num_rows; ++i) {
+            const auto& v = build_buf.columns[build_key_idx].get(i);
+            // Προσοχή: Ελέγχουμε για STR_REF που παράγει το scan
+            if (v.type == value_t::Type::STR_REF) {
+                ht[Contest::PackedStringRef::unpack(v.u.ref)].push_back(i);
             }
-            for (size_t j = 0; j < right.num_rows; ++j) {
-                const auto& v = right.columns[join.right_attr].get(j);
-                if (v.type != value_t::Type::STR) continue;
-                    auto it = ht.find(PackedStringRef::unpack(v.u.ref));
-                if (it != ht.end()) for (auto li : it->second) emit_pair(li, j);
-            }
-        } else {
-            for (size_t i = 0; i < right.num_rows; ++i) {
-                const auto& v = right.columns[join.right_attr].get(i);
-                    if (v.type == value_t::Type::STR) ht[PackedStringRef::unpack(v.u.ref)].push_back(i);
-            }
-            for (size_t j = 0; j < left.num_rows; ++j) {
-                const auto& v = left.columns[join.left_attr].get(j);
-                if (v.type != value_t::Type::STR) continue;
-                    auto it = ht.find(PackedStringRef::unpack(v.u.ref));
-                if (it != ht.end()) for (auto ri : it->second) emit_pair(j, ri);
+        }
+
+        // Probe
+        const ColumnBuffer& probe_buf = build_left_side ? right : left;
+        size_t probe_key_idx = build_left_side ? join.right_attr : join.left_attr;
+
+        for (size_t j = 0; j < probe_buf.num_rows; ++j) {
+            const auto& v = probe_buf.columns[probe_key_idx].get(j);
+            if (v.type == value_t::Type::STR_REF) {
+                auto it = ht.find(Contest::PackedStringRef::unpack(v.u.ref));
+                if (it != ht.end()) {
+                    for (auto build_idx : it->second) {
+                        if (build_left_side) emit_pair(build_idx, j);
+                        else emit_pair(j, build_idx);
+                    }
+                }
             }
         }
     };
 
     DataType key_type = join.build_left ? std::get<1>(plan.nodes[join.left].output_attrs[join.left_attr])
-                                         : std::get<1>(plan.nodes[join.right].output_attrs[join.right_attr]);
+                                        : std::get<1>(plan.nodes[join.right].output_attrs[join.right_attr]);
     switch (key_type) {
         case DataType::INT32:   join_numeric(int32_t{}, join.build_left); break;
         case DataType::INT64:   join_numeric(int64_t{}, join.build_left); break;
@@ -221,71 +125,6 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
     }
 
     return out;
-}
-
-ColumnarTable finalize_columnbuffer_to_columnar(const Plan& plan,
-    const ColumnBuffer& buf,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    // Convert paged columns directly to ColumnarTable format
-    ColumnarTable result;
-    result.num_rows = buf.num_rows;
-    result.columns.reserve(output_attrs.size());
-
-    StringRefResolver resolver(&plan);
-    std::string tmp;
-
-    for (size_t col_idx = 0; col_idx < output_attrs.size(); ++col_idx) {
-        DataType dtype = std::get<1>(output_attrs[col_idx]);
-        Column col(dtype);
-
-        if (buf.num_rows == 0) {
-            // Empty result
-            result.columns.emplace_back(std::move(col));
-            continue;
-        }
-
-        // Process the column data
-        if (dtype == DataType::INT32) {
-            ColumnInserter<int32_t> inserter(col);
-            for (size_t row_idx = 0; row_idx < buf.num_rows; ++row_idx) {
-                const auto& v = buf.columns[col_idx].get(row_idx);
-                if (v.type == value_t::Type::I32) inserter.insert(v.u.i32);
-                else inserter.insert_null();
-            }
-            inserter.finalize();
-        } else if (dtype == DataType::INT64) {
-            ColumnInserter<int64_t> inserter(col);
-            for (size_t row_idx = 0; row_idx < buf.num_rows; ++row_idx) {
-                const auto& v = buf.columns[col_idx].get(row_idx);
-                if (v.type == value_t::Type::I64) inserter.insert(v.u.i64);
-                else inserter.insert_null();
-            }
-            inserter.finalize();
-        } else if (dtype == DataType::FP64) {
-            ColumnInserter<double> inserter(col);
-            for (size_t row_idx = 0; row_idx < buf.num_rows; ++row_idx) {
-                const auto& v = buf.columns[col_idx].get(row_idx);
-                if (v.type == value_t::Type::FP64) inserter.insert(v.u.f64);
-                else inserter.insert_null();
-            }
-            inserter.finalize();
-        } else if (dtype == DataType::VARCHAR) {
-            ColumnInserter<std::string> inserter(col);
-            for (size_t row_idx = 0; row_idx < buf.num_rows; ++row_idx) {
-                const auto& v = buf.columns[col_idx].get(row_idx);
-                if (v.type == value_t::Type::STR) {
-                    auto [ptr, len] = resolver.resolve(v.u.ref, tmp);
-                    if (ptr != nullptr) inserter.insert(std::string(ptr, ptr + len));
-                    else inserter.insert_null();
-                } else inserter.insert_null();
-            }
-            inserter.finalize();
-        }
-
-        result.columns.emplace_back(std::move(col));
-    }
-
-    return result;
 }
 
 } // namespace Contest

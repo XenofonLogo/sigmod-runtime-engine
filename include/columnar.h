@@ -8,6 +8,13 @@
 
 namespace Contest {
 
+// Helper function to read bitmap (moved to header to be visible to late_materialization.cpp)
+static inline bool get_bitmap_local_col(const uint8_t* bitmap, uint16_t idx) {
+    auto byte_idx = idx / 8;
+    auto bit = idx % 8;
+    return bitmap[byte_idx] & (1u << bit);
+}
+
 // Column store
 struct column_t {
     std::vector<std::vector<value_t>> pages;

@@ -1,36 +1,27 @@
-#include "late_materialization.h"
 #include <hardware.h>
 #include <plan.h>
 #include <table.h>
 #include "columnar.h"
+
 #include "unchained_hashtable.h"
 #include "hash_functions.h"
 #include "bloom_filter.h"
 
 namespace Contest {
 
-// Δηλώσεις
-ColumnBuffer scan_columnar_to_columnbuffer(
-    const Plan& plan, 
-    const ScanNode& scan, 
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs);
-
-ColumnarTable finalize_columnbuffer_to_columnar(
-    const Plan& plan, 
-    const ColumnBuffer& buffer, 
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs);
-
 using ExecuteResult = ColumnBuffer;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
-// JoinAlgorithm (INT32-only)
+// ============================================================================
+// JoinAlgorithm (INT32-only) – HASH TABLE JOIN USED BY THE FIRST FILE NOW
+// ============================================================================
 struct JoinAlgorithm {
-    bool                                     build_left;
-    ExecuteResult&                           left;      
-    ExecuteResult&                           right;     
-    ExecuteResult&                           results;
-    size_t                                   left_col, right_col;
+    bool                                             build_left;
+    ExecuteResult&                                   left;      // build-side if build_left=true
+    ExecuteResult&                                   right;     // probe-side if build_left=true
+    ExecuteResult&                                   results;
+    size_t                                           left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
 
     void run_int32() {
@@ -41,6 +32,7 @@ struct JoinAlgorithm {
         size_t build_key_col = build_left ? left_col : right_col;
         size_t probe_key_col = build_left ? right_col : left_col;
 
+        // Build entries: (key, row_id)
         std::vector<std::pair<Key, size_t>> entries;
         entries.reserve(build_buf->num_rows);
         for (size_t i = 0; i < build_buf->num_rows; ++i) {
@@ -51,12 +43,15 @@ struct JoinAlgorithm {
 
         if (entries.empty()) return;
 
+        // Build hash table
         UnchainedHashTable<Key> table;
         table.reserve(entries.size());
         table.build_from_entries(entries);
 
+        // Emit joined row
         auto emit_pair = [&](size_t lidx, size_t ridx) {
             size_t left_cols = left.num_cols();
+
             for (size_t i = 0; i < output_attrs.size(); ++i) {
                 size_t src = std::get<0>(output_attrs[i]);
                 if (src < left_cols)
@@ -67,11 +62,13 @@ struct JoinAlgorithm {
             results.num_rows++;
         };
 
+        // Probe
         for (size_t j = 0; j < probe_buf->num_rows; ++j) {
             const auto& v = probe_buf->columns[probe_key_col].get(j);
             if (v.type != value_t::Type::I32) continue;
 
             Key probe_key = v.u.i32;
+
             size_t len = 0;
             const auto* bucket = table.probe(probe_key, len);
             if (!bucket || len == 0) continue;
@@ -79,25 +76,33 @@ struct JoinAlgorithm {
             for (size_t k = 0; k < len; ++k) {
                 if (bucket[k].key != probe_key) continue;
                 size_t build_row = bucket[k].row_id;
-                if (build_left) emit_pair(build_row, j);
-                else emit_pair(j, build_row);
+
+                if (build_left)
+                    emit_pair(build_row, j);
+                else
+                    emit_pair(j, build_row);
             }
         }
     }
 };
 
-ExecuteResult execute_hash_join(const Plan& plan,
-    const JoinNode& join,
+// ============================================================================
+// HASH JOIN – now uses JoinAlgorithm instead of join_columnbuffer_hash
+// ============================================================================
+ExecuteResult execute_hash_join(const Plan&          plan,
+    const JoinNode&                                  join,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs)
 {
     size_t left_idx  = join.left;
     size_t right_idx = join.right;
+
     auto& left_node  = plan.nodes[left_idx];
     auto& right_node = plan.nodes[right_idx];
 
     auto left  = execute_impl(plan, left_idx);
     auto right = execute_impl(plan, right_idx);
 
+    // prepare output ColumnBuffer
     ColumnBuffer results(output_attrs.size(), 0);
     results.types.reserve(output_attrs.size());
     for (auto& t : output_attrs)
@@ -113,6 +118,7 @@ ExecuteResult execute_hash_join(const Plan& plan,
         .output_attrs = output_attrs
     };
 
+    // enforce INT32 join key
     if (join.build_left) {
         if (std::get<1>(left_node.output_attrs[join.left_attr]) != DataType::INT32)
             throw std::runtime_error("Only INT32 join columns supported.");
@@ -121,17 +127,25 @@ ExecuteResult execute_hash_join(const Plan& plan,
             throw std::runtime_error("Only INT32 join columns supported.");
     }
 
+    // run the hashtable join
     ja.run_int32();
+
     return results;
 }
 
-ExecuteResult execute_scan(const Plan& plan,
-    const ScanNode& scan,
+// ============================================================================
+// Scan (same as both files)
+// ============================================================================
+ExecuteResult execute_scan(const Plan&               plan,
+    const ScanNode&                                  scan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs)
 {
     return scan_columnar_to_columnbuffer(plan, scan, output_attrs);
 }
 
+// ============================================================================
+// execute_impl / execute / context (unchanged)
+// ============================================================================
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
     auto& node = plan.nodes[node_idx];
     return std::visit(
