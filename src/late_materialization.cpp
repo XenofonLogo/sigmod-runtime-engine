@@ -171,7 +171,7 @@ ColumnarTable finalize_columnbuffer_to_columnar(
             ColumnInserter<int32_t> inserter(col);
             for (size_t row_idx = 0; row_idx < buf.num_rows; ++row_idx) {
                 const auto& v = buf.columns[col_idx].get(row_idx);
-                if (v.type == value_t::Type::I32) inserter.insert(v.u.i32);
+                if (!v.is_null()) inserter.insert(v.as_i32());
                 else inserter.insert_null();
             }
             inserter.finalize();
@@ -180,7 +180,7 @@ ColumnarTable finalize_columnbuffer_to_columnar(
             ColumnInserter<int64_t> inserter(col);
             for (size_t row_idx = 0; row_idx < buf.num_rows; ++row_idx) {
                 const auto& v = buf.columns[col_idx].get(row_idx);
-                if (v.type == value_t::Type::I64) inserter.insert(v.u.i64);
+                if (!v.is_null()) inserter.insert(v.as_i64());
                 else inserter.insert_null();
             }
             inserter.finalize();
@@ -189,7 +189,7 @@ ColumnarTable finalize_columnbuffer_to_columnar(
             ColumnInserter<double> inserter(col);
             for (size_t row_idx = 0; row_idx < buf.num_rows; ++row_idx) {
                 const auto& v = buf.columns[col_idx].get(row_idx);
-                if (v.type == value_t::Type::FP64) inserter.insert(v.u.f64);
+                if (!v.is_null()) inserter.insert(v.as_f64());
                 else inserter.insert_null();
             }
             inserter.finalize();
@@ -198,9 +198,9 @@ ColumnarTable finalize_columnbuffer_to_columnar(
             ColumnInserter<std::string> inserter(col);
             for (size_t row_idx = 0; row_idx < buf.num_rows; ++row_idx) {
                 const auto& v = buf.columns[col_idx].get(row_idx);
-                
-                if (v.type == value_t::Type::STR_REF) {
-                    auto [ptr, len] = resolver.resolve(v.u.ref, tmp_buf);
+
+                if (!v.is_null()) {
+                    auto [ptr, len] = resolver.resolve(v.as_ref(), tmp_buf);
                     if (ptr != nullptr) inserter.insert(std::string_view(ptr, len));
                     else inserter.insert_null();
                 } else {

@@ -56,36 +56,32 @@ struct StringRefEq {
     bool operator()(const PackedStringRef& a, const PackedStringRef& b) const { return a.raw == b.raw; }
 };
 
-// 4. value_t (Unified)
+// 4. value_t (compact 64-bit payload)
+//
+// We store a single 64-bit word per value. Column-level `DataType` identifies
+// how to interpret the payload. A reserved payload of `UINT64_MAX` encodes NULL.
 struct value_t {
-    enum class Type : uint8_t { I32, I64, FP64, STR, STR_REF, NULL_VAL } type;
+    uint64_t raw;
 
-    union {
-        int32_t i32;
-        int64_t i64;
-        double  f64;
-        uint64_t ref; // Stores PackedStringRef.raw
-    } u;
+    static value_t make_i32(int32_t v) { value_t x; x.raw = static_cast<uint64_t>(static_cast<int64_t>(v)); return x; }
+    static value_t make_i64(int64_t v) { value_t x; x.raw = static_cast<uint64_t>(v); return x; }
+    static value_t make_f64(double v) { value_t x; uint64_t bits; std::memcpy(&bits, &v, sizeof(bits)); x.raw = bits; return x; }
 
-    // Factories
-    static value_t make_i32(int32_t v) { value_t x; x.type = Type::I32; x.u.i32 = v; return x; }
-    static value_t make_i64(int64_t v) { value_t x; x.type = Type::I64; x.u.i64 = v; return x; }
-    static value_t make_f64(double v) { value_t x; x.type = Type::FP64; x.u.f64 = v; return x; }
-    
-    // Explicit Late Materialization factory
+    // Explicit Late Materialization factory (pack a full 64-bit string reference)
     static value_t make_str_ref(uint8_t t, uint8_t c, uint32_t p, uint16_t s) {
-        value_t x; x.type = Type::STR_REF; x.u.ref = PackedStringRef(t,c,p,s).raw; return x;
-    }
-    
-    // Factory συμβατότητας για το columnar.cpp
-    static value_t make_str(PackedStringRef sr) {
-         value_t x; x.type = Type::STR_REF; x.u.ref = sr.raw; return x;
+        value_t x; x.raw = PackedStringRef(t,c,p,s).raw; return x;
     }
 
-    // Factory για NULL
-    static value_t make_null() {
-        value_t x; x.type = Type::NULL_VAL; x.u.i64 = 0; return x; 
-    }
+    static value_t make_str(PackedStringRef sr) { value_t x; x.raw = sr.raw; return x; }
+
+    static value_t make_null() { value_t x; x.raw = UINT64_MAX; return x; }
+
+    bool is_null() const { return raw == UINT64_MAX; }
+
+    int32_t as_i32() const { return static_cast<int32_t>(static_cast<int64_t>(raw)); }
+    int64_t as_i64() const { return static_cast<int64_t>(raw); }
+    double  as_f64() const { double v; std::memcpy(&v, &raw, sizeof(v)); return v; }
+    uint64_t as_ref() const { return raw; }
 };
 
 // 5. StringRefResolver

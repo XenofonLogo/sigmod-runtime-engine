@@ -45,11 +45,11 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
         for (size_t i = 0; i < build_buf.num_rows; ++i) {
             const auto& v = build_buf.columns[build_key_idx].get(i);
             if constexpr (std::is_same_v<T, int32_t>) {
-                if (v.type == value_t::Type::I32) ht[v.u.i32].push_back(i);
+                if (!v.is_null()) ht[v.as_i32()].push_back(i);
             } else if constexpr (std::is_same_v<T, int64_t>) {
-                if (v.type == value_t::Type::I64) ht[v.u.i64].push_back(i);
+                if (!v.is_null()) ht[v.as_i64()].push_back(i);
             } else if constexpr (std::is_same_v<T, double>) {
-                if (v.type == value_t::Type::FP64) ht[v.u.f64].push_back(i);
+                if (!v.is_null()) ht[v.as_f64()].push_back(i);
             }
         }
 
@@ -63,11 +63,11 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
             typename std::unordered_map<T, std::vector<size_t>>::iterator it;
 
             if constexpr (std::is_same_v<T, int32_t>) {
-                if (v.type == value_t::Type::I32) { match = true; it = ht.find(v.u.i32); }
+                if (!v.is_null()) { match = true; it = ht.find(v.as_i32()); }
             } else if constexpr (std::is_same_v<T, int64_t>) {
-                if (v.type == value_t::Type::I64) { match = true; it = ht.find(v.u.i64); }
+                if (!v.is_null()) { match = true; it = ht.find(v.as_i64()); }
             } else if constexpr (std::is_same_v<T, double>) {
-                if (v.type == value_t::Type::FP64) { match = true; it = ht.find(v.u.f64); }
+                if (!v.is_null()) { match = true; it = ht.find(v.as_f64()); }
             }
 
             if (match && it != ht.end()) {
@@ -92,8 +92,8 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
         for (size_t i = 0; i < build_buf.num_rows; ++i) {
             const auto& v = build_buf.columns[build_key_idx].get(i);
             // Προσοχή: Ελέγχουμε για STR_REF που παράγει το scan
-            if (v.type == value_t::Type::STR_REF) {
-                ht[Contest::PackedStringRef::unpack(v.u.ref)].push_back(i);
+            if (!v.is_null()) {
+                ht[Contest::PackedStringRef::unpack(v.as_ref())].push_back(i);
             }
         }
 
@@ -103,8 +103,8 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
 
         for (size_t j = 0; j < probe_buf.num_rows; ++j) {
             const auto& v = probe_buf.columns[probe_key_idx].get(j);
-            if (v.type == value_t::Type::STR_REF) {
-                auto it = ht.find(Contest::PackedStringRef::unpack(v.u.ref));
+            if (!v.is_null()) {
+                auto it = ht.find(Contest::PackedStringRef::unpack(v.as_ref()));
                 if (it != ht.end()) {
                     for (auto build_idx : it->second) {
                         if (build_left_side) emit_pair(build_idx, j);
