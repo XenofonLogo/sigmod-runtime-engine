@@ -1,0 +1,54 @@
+// robinhood_wrapper.h
+#pragma once
+
+// Include the general interface
+#include "hashtable_interface.h" 
+
+// Include the concrete implementation (your file)
+#include "robinhood.h" 
+#include <memory>
+
+namespace Contest {
+
+template <typename Key>
+class RobinHoodHashTableWrapper : public IHashTable<Key> {
+private:
+    RobinHoodBackend<Key> backend_;
+
+public:
+    // Implementation of IHashTable methods
+    void reserve(size_t capacity) override {
+        // The RobinHoodBackend doesn't have a direct 'reserve' method, 
+        // but it will handle capacity calculation in build_from_entries.
+        // We can leave this empty or throw, but for compatibility, we leave it empty.
+        // If the backend required pre-allocation, the logic would go here.
+    }
+
+    void build_from_entries(const std::vector<std::pair<Key, size_t>>& entries) override {
+        // Delegate directly to the RobinHoodBackend's build method
+        backend_.build_from_entries(entries);
+    }
+
+    const HashEntry<Key>* probe(const Key& key, size_t& len) const override {
+        // The RobinHoodBackend returns a std::pair, so we unwrap it.
+        auto result = backend_.probe(key);
+        
+        // Update the reference argument (len) with the count from the pair.
+        len = result.second; 
+        
+        // Return the pointer to the HashEntry
+        return result.first; 
+    }
+};
+
+// =======================================================================
+// FACTORY FUNCTION IMPLEMENTATION (The small change point!)
+// This function tells the caller which concrete hash table to instantiate.
+// =======================================================================
+template <typename Key>
+std::unique_ptr<IHashTable<Key>> create_hashtable() {
+    // FIX: This is the ONLY place you swap implementations!
+    return std::make_unique<RobinHoodHashTableWrapper<Key>>();
+}
+
+} // namespace Contest

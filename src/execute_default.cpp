@@ -1,27 +1,30 @@
+// execute.cpp
 #include <hardware.h>
 #include <plan.h>
 #include <table.h>
 #include "columnar.h"
 
-#include "unchained_hashtable.h"
-#include "hash_functions.h"
-#include "bloom_filter.h"
+#include "hashtable_interface.h" // NEW: Include the interface header
 
+// OLD INCLUDES REMOVED:
+ //#include "unchained_hashtable_wrapper.h"
+ //#include "robinhood_wrapper.h"
+//#include "cuckoo_wrapper.h"
+#include "hopscotch_wrapper.h" // NEW: Include the Hopscotch wrapper
 namespace Contest {
 
 using ExecuteResult = ColumnBuffer;
-
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
 // ============================================================================
-// JoinAlgorithm (INT32-only) – HASH TABLE JOIN USED BY THE FIRST FILE NOW
+// JoinAlgorithm (INT32-only)
 // ============================================================================
 struct JoinAlgorithm {
-    bool                                             build_left;
-    ExecuteResult&                                   left;      // build-side if build_left=true
-    ExecuteResult&                                   right;     // probe-side if build_left=true
-    ExecuteResult&                                   results;
-    size_t                                           left_col, right_col;
+    bool                                               build_left;
+    ExecuteResult&                                     left;      // build-side if build_left=true
+    ExecuteResult&                                     right;     // probe-side if build_left=true
+    ExecuteResult&                                     results;
+    size_t                                             left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
 
     void run_int32() {
@@ -44,9 +47,10 @@ struct JoinAlgorithm {
         if (entries.empty()) return;
 
         // Build hash table
-        UnchainedHashTable<Key> table;
-        table.reserve(entries.size());
-        table.build_from_entries(entries);
+        // NEW: Use the factory function and the interface (IHashTable)
+        auto table = create_hashtable<Key>();
+        table->reserve(entries.size());
+        table->build_from_entries(entries);
 
         // Emit joined row
         auto emit_pair = [&](size_t lidx, size_t ridx) {
@@ -70,10 +74,12 @@ struct JoinAlgorithm {
             Key probe_key = v.as_i32();
 
             size_t len = 0;
-            const auto* bucket = table.probe(probe_key, len);
+            // NEW: Use the interface method (table->probe)
+            const auto* bucket = table->probe(probe_key, len);
             if (!bucket || len == 0) continue;
 
             for (size_t k = 0; k < len; ++k) {
+                // The structure of HashEntry<Key> is now defined in hashtable_interface.h
                 if (bucket[k].key != probe_key) continue;
                 size_t build_row = bucket[k].row_id;
 
@@ -86,11 +92,12 @@ struct JoinAlgorithm {
     }
 };
 
+// (Rest of execute.cpp remains the same)
 // ============================================================================
 // HASH JOIN – now uses JoinAlgorithm instead of join_columnbuffer_hash
 // ============================================================================
-ExecuteResult execute_hash_join(const Plan&          plan,
-    const JoinNode&                                  join,
+ExecuteResult execute_hash_join(const Plan&                plan,
+    const JoinNode&                                    join,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs)
 {
     size_t left_idx  = join.left;
@@ -136,8 +143,8 @@ ExecuteResult execute_hash_join(const Plan&          plan,
 // ============================================================================
 // Scan (same as both files)
 // ============================================================================
-ExecuteResult execute_scan(const Plan&               plan,
-    const ScanNode&                                  scan,
+ExecuteResult execute_scan(const Plan&                  plan,
+    const ScanNode&                                    scan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs)
 {
     return scan_columnar_to_columnbuffer(plan, scan, output_attrs);
