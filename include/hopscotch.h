@@ -37,9 +37,9 @@ private:
     size_t _capacity = 0;
     size_t _initial_capacity = 0;
 
-    // ---------------------------------------------
+   
     // Composite key generator
-    // ---------------------------------------------
+    
     inline uint64_t make_ckey(const Key& k) const {
         // ID for type namespace (ensures different tables don't mix)
         static uint64_t tid = (std::hash<std::string>()(typeid(Key).name()) & 0xFFFFULL);
@@ -56,9 +56,9 @@ private:
         return j + (_capacity - i);
     }
 
-    // ---------------------------------------------
+    
     // Move empty slot closer
-    // ---------------------------------------------
+    
     size_t move_slot_closer(size_t home_slot, size_t empty_slot) {
         for (size_t offset = 1; offset < NEIGHBORHOOD_SIZE; ++offset) {
 
@@ -90,9 +90,9 @@ private:
         return (size_t)-1;
     }
 
-    // ---------------------------------------------
+    
     // Insert
-    // ---------------------------------------------
+    
     bool insert_slot(const Slot& info) {
         size_t home = hash_ckey(info.ckey);
 
@@ -123,9 +123,9 @@ private:
 public:
     HopscotchBackend() = default;
 
-    // ---------------------------------------------
+    
     // Build
-    // ---------------------------------------------
+    
     void build_from_entries(const std::vector<std::pair<Key, size_t>>& entries) {
         if (entries.empty()) {
             _capacity = 0; _table.clear(); _hop_map.clear(); _storage.clear();
@@ -178,9 +178,9 @@ public:
         }
     }
 
-    // ---------------------------------------------
+   
     // Probe
-    // ---------------------------------------------
+  
     std::pair<const Entry*, size_t> probe(const Key& k) const {
         if (_capacity == 0) return {nullptr, 0};
 

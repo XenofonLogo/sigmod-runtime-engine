@@ -6,8 +6,8 @@
 #include <cstdint>
 #include <functional>
 #include <cmath>
-#include <utility> // For std::pair
-#include <stdexcept> // For runtime_error
+#include <utility> 
+#include <stdexcept> 
 #include "hashtable_interface.h"
 #include "hash_common.h"
 #include <unordered_map>
@@ -28,7 +28,7 @@ private:
 
     // Συνάρτηση κατακερματισμού (hash function)
     size_t hash_fn(const Key& k) const {
-        // FIX: Χρησιμοποιούμε μια βελτιωμένη συνάρτηση hash (π.χ. FNV-1a ή παρόμοια ανάμειξη)
+        // Χρησιμοποιούμε μια βελτιωμένη συνάρτηση hash (π.χ. FNV-1a ή παρόμοια ανάμειξη)
         // για καλύτερη διασπορά και μείωση των συγκρούσεων (clustering).
         // FNV-1a style prime/xor mixing (optimised for integer keys)
         uint32_t hash = 2166136261U;
@@ -42,7 +42,7 @@ private:
     }
 
     // Υπολογίζει το Probe Sequence Length (PSL)
-    // FIX: Corrected signature: added 'size_t home_slot_idx'
+    
     size_t psl(size_t current_slot_idx, size_t home_slot_idx) const {
         // Υπολογίζει την απόσταση (στην κυκλική δομή)
         if (current_slot_idx >= home_slot_idx) {
@@ -89,14 +89,14 @@ private:
     }
 
 public:
-    // ------------------------------------------------------------
+    
     // 3. Διεπαφή Executor
-    // ------------------------------------------------------------
+    
 
     RobinHoodBackend() = default;
-    /**
-     * @brief Κατασκευάζει το Robin Hood Hash Table από τις εγγραφές της build side.
-     */
+  
+     // Κατασκευάζει το Robin Hood Hash Table από τις εγγραφές της build side.
+     
     void build_from_entries(const std::vector<std::pair<Key, size_t>>& entries) {
         if (entries.empty()) {
              _capacity = 0;
@@ -171,9 +171,9 @@ public:
         throw std::runtime_error("Robin Hood Hashing failed to find a valid placement after multiple rehash attempts.");
     }
 
-    /**
-     * @brief Πραγματοποιεί αναζήτηση (probe) για ένα κλειδί.
-     */
+    
+     // Πραγματοποιεί αναζήτηση (probe) για ένα κλειδί.
+    
     std::pair<const Entry*, size_t> probe(const Key& k) const {
         if (_capacity == 0 || _table.empty()) {
             return {nullptr, 0};

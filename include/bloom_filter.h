@@ -6,7 +6,7 @@ namespace Bloom {
 
 //
 // 1) Precomputed popcount table for all 16-bit values
-// --------------------------------------------------
+// 
 //
 // Υπολογίζουμε *κατά τη μεταγλώττιση* (constexpr) έναν πίνακα 65.536 θέσεων,
 // όπου table[x] = αριθμός των set bits στο x (popcount).

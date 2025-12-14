@@ -11,9 +11,9 @@ struct Plan;
 
 namespace Contest {
 
-// ----------------------------------------------------------------------------
-// 1. PackedStringRef (64-bit reference to string data)
-// ----------------------------------------------------------------------------
+
+//  PackedStringRef (64-bit reference to string data)
+
 struct PackedStringRef {
     union {
         uint64_t raw;
@@ -40,10 +40,10 @@ struct PackedStringRef {
     bool operator==(const PackedStringRef& other) const { return raw == other.raw; }
 };
 
-// 2. StringRef alias (για συμβατότητα με υπάρχοντα κώδικα)
+//  StringRef alias (για συμβατότητα με υπάρχοντα κώδικα)
 typedef PackedStringRef StringRef; 
 
-// 3. Hash & Equality functors
+//  Hash & Equality functors
 // forward-declare resolver used by hash/eq
 struct StringRefResolver;
 

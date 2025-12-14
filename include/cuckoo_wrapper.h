@@ -1,10 +1,7 @@
 // cuckoo_wrapper.h
 #pragma once
 
-// Include the general interface
 #include "hashtable_interface.h" 
-
-// Include the concrete implementation (your file)
 #include "cuckoo.h" 
 #include <memory>
 #include <stdexcept>
@@ -41,13 +38,9 @@ public:
     }
 };
 
-// =======================================================================
-// FACTORY FUNCTION IMPLEMENTATION
-// This function tells the caller which concrete hash table to instantiate.
-// =======================================================================
 template <typename Key>
 std::unique_ptr<IHashTable<Key>> create_hashtable() {
-    // FIX: This is where we plug in the Cuckoo implementation
+   
     return std::make_unique<CuckooHashTableWrapper<Key>>();
 }
 

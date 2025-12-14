@@ -1,10 +1,8 @@
-// robinhood_wrapper.h
+
 #pragma once
 
-// Include the general interface
-#include "hashtable_interface.h" 
 
-// Include the concrete implementation (your file)
+#include "hashtable_interface.h" 
 #include "robinhood.h" 
 #include <memory>
 
@@ -41,13 +39,10 @@ public:
     }
 };
 
-// =======================================================================
-// FACTORY FUNCTION IMPLEMENTATION (The small change point!)
-// This function tells the caller which concrete hash table to instantiate.
-// =======================================================================
+
 template <typename Key>
 std::unique_ptr<IHashTable<Key>> create_hashtable() {
-    // FIX: This is the ONLY place you swap implementations!
+    
     return std::make_unique<RobinHoodHashTableWrapper<Key>>();
 }
 

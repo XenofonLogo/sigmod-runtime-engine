@@ -1,10 +1,7 @@
-// hopscotch_wrapper.h
 #pragma once
 
-// Include the general interface
-#include "hashtable_interface.h" 
 
-// Include the concrete implementation (your file)
+#include "hashtable_interface.h" 
 #include "hopscotch.h" 
 #include <memory>
 #include <stdexcept>
@@ -41,10 +38,7 @@ public:
     }
 };
 
-// =======================================================================
-// FACTORY FUNCTION IMPLEMENTATION
-// This function tells the caller which concrete hash table to instantiate.
-// =======================================================================
+
 template <typename Key>
 std::unique_ptr<IHashTable<Key>> create_hashtable() {
     // FIX: This is where we plug in the Hopscotch implementation

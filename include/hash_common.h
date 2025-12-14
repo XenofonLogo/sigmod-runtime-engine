@@ -1,4 +1,4 @@
-// hash_common.h
+
 #pragma once
 
 #include <cstddef>
@@ -6,7 +6,7 @@
 
 namespace Contest {
 
-// 1. Common Entry Structure (Payload)
+
 // This must be identical to the one used by IHashTable
 template <typename Key>
 struct HashEntry {
@@ -14,7 +14,6 @@ struct HashEntry {
     size_t row_id; // The row ID from the build side
 };
 
-// 2. Index/Metadata Structure (Specific to Robin Hood, but defined here for clarity)
 // This holds the information stored in the hash table array slots.
 template<typename Key>
 struct KeyIndexInfo {
