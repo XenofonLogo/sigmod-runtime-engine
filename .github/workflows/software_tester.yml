@@ -15,7 +15,7 @@ jobs:
       group: k23a
     strategy:
       matrix:
-        impl: [robinhood, hopscotch, cuckoo]
+        impl: [default]
 
     steps:
       - uses: actions/checkout@v4

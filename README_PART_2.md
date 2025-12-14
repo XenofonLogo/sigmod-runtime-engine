@@ -1,246 +1,140 @@
-οδηγιες εκτελεσης unit_tests
-g++ -std=c++20 -O2 tests/test_unchained_hashtable.cpp -Iinclude -o test_unchained_hashtable
-./test_unchained_hashtable
 
-Εισαγωγή
-Η παρούσα υλοποίηση επεκτείνει τον query engine και
- ενσωματώνει έναν πλήρως βελτιστοποιημένο Unchained Hash Table
-  για επιτάχυνση των hash joins. 
-  Ο στόχος είναι η ελαχιστοποίηση των cache misses
-   και η δημιουργία ενός layout που προσεγγίζει το paper της εργασίας.
+* # 📖 Εργασία: Ανάπτυξη Λογισμικού για Πληροφοριακά Συστήματα (2ο Μέρος)
 
-Υλοποιήθηκαν:
+[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/gjaw_qSU)
 
-Γρήγορος Fibonacci hashing για INT32 keys
+[![Build Status](https://github.com/uoa-k23a/k23a-2025-d1-runtimeerror/actions/workflows/software_tester.yml/badge.svg)](https://github.com/uoa-k23a/k23a-2025-d1-runtimeerror/actions/workflows/software_tester.yml)
 
-Προϋπολογισμένος πίνακας 16-bit popcount (65536 entries)
+## 👥 Μέλη Ομάδας
 
-Συμπαγής Unchained Hashtable με prefix directory
+* **Ξενοφών Λογοθέτης** - sdi2100087@di.uoa.gr - `1115202100087`
+* **Σακκέτος Γεώργιος** - sdi2000177@di.uoa.gr - `1115202000177`
+* **Φωτιάδης Ευάγγελος** - sdi1900301@di.uoa.gr - `1115201900301`
 
-4-bit Bloom filters ανά directory bucket
+---
 
-Αποδοτικό build-phase και probe-phase
+## Εκτέλεση
 
-Μικρές αλλαγές στο execute.cpp για να χρησιμοποιηθεί ο νέος πίνακας
+##### Οι αρχική υλοποίηση που τρέχει σαν default
 
-Το σύστημα έχει πλήρη unit tests και επαληθεύτηκε με large-scale και heavy-collision δοκιμές.
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DEXECUTE_IMPL=default -Wno-dev
+cmake --build build -- -j $(nproc) fast
+```
 
-Δομή Αρχείων
+ή
 
-include/
-unchained_hashtable.h
-bloom_filter.h
-hash_functions.h
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+cmake --build build -- -j $(nproc) fast
+```
 
-src/
-execute.cpp
+##### Οδηγίες εκτέλεσης unit_tests
 
-tests/
-test.cpp
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DEXECUTE_IMPL=default -Wno-dev && cmake --build build --target software_tester -- -j && ./build/software_tester --reporter compact
+```
 
-Αναλυτική Περιγραφή Σχεδιαστικών Επιλογών
+##### Οι υλοποιήσεις
 
-3.1 hash_functions.h
+```bash
+Αλλαγή του header στο αρχείο "execute_default.cpp"
+```
 
-Στόχος:
-Παροχή εξαιρετικά γρήγορης hash function για INT32 join keys.
+> ***Σημείωση:*** Το υπόλοιπο της εκτέλεσης είναι ίδιο
 
-Υλοποίηση:
+---
 
-Επιλέχθηκε ο Fibonacci hashing:
-h(x) = uint64_t(x) * 11400714819323198485ULL
+## Δομή Αρχείων
 
-Είναι ταχύτερος από CRC32 και έχει πολύ καλή κατανομή.
+- **include/** — Public headers και API
 
-Ο CRC32 παραμένει διαθέσιμος, αλλά δεν είναι default.
+  - include/unchained_hashtable.h — API του Unchained Hashtable
+  - include/bloom_filter.h — Bloom helpers (tag & masks)
+  - include/columnar.h — Columnar API (views, column buffers)
+  - include/late_materialization.h — LM helpers (`pack_string_ref`, `resolve_string_ref`)
+- **src/** — Υλοποιήσεις
 
-Υποστηρίζει εύκολη αλλαγή του hasher μέσω template παραμέτρων στο UnchainedHashTable.
+  - src/execute_default.cpp — Integration του JoinAlgorithm και χρήση hashtable
+  - src/unchained_hashtable.cpp — Υλοποίηση unchained hashtable
+  - src/late_materialization.cpp — LM helpers, scan/resolve functions
+  - src/columnar.cpp — Columnar loaders/iterators και paging
 
-Γιατί αυτή η επιλογή:
+Η παραπάνω λίστα συνοψίζει τα πιο σημαντικά αρχεία/φακέλους — δείτε τα αντίστοιχα headers στο `include/` και τις υλοποιήσεις στο `src/` για λεπτομέρειες.
 
-Οι join στήλες είναι INT32, άρα δεν χρειάζεται γενική hash function.
+## 1. Late Materialization
 
-Ο Fibonacci hashing είναι branchless και πολύ γρήγορος.
+* **Υλοποιήθηκε από:** **Φωτιάδης Ευάγγελος**
 
-Είναι η ίδια αρχή που χρησιμοποιείται σε μεγάλα συστήματα (Java, Linux kernel).
+Το Late Materialization (LM) περιορίζει την άμεση υλοποίηση (materialization) μεγάλων ή μεταβλητού μήκους πεδίων (π.χ. `VARCHAR`) κατά τη διάρκεια των scans και των joins. Αντί να αντιγράφονται οι συμβολοσειρές σε προσωρινές δομές, το σύστημα χρησιμοποιεί compact 64-bit αναφορές (`PackedStringRef`) που περιέχουν `table_id`, `column_id`, `page_id`, `offset` και flags (π.χ. null). Η πραγματική συμβολοσειρά ανακτάται μόνο όταν απαιτείται (π.χ. για έξοδο ή σύγκριση με πλήρες string), μειώνοντας αντιγραφές και memory bandwidth.
 
-3.2 bloom_filter.h
+Κύριες αλλαγές / οφέλη:
 
-Στόχος:
-Απόρριψη μη σχετικών tuples ήδη στο επίπεδο directory bucket χωρίς κόστος.
+- Zero-copy string handling με `PackedStringRef`, σημαντική μείωση σε αντιγραφές και memory bandwidth.
+- Προσθήκη module `late_materialization` (π.χ. `src/late_materialization.cpp`, `include/late_materialization.h`) με helpers για packing/ resolving των string refs.
+- Προσαρμογή του `join_columnbuffer_hash` ώστε να αποδέχεται γενικό `value_t` που μπορεί να περιέχει είτε υλοποιημένες τιμές είτε `PackedStringRef`.
+- Σελιδοποίηση (`pages`) για αποδοτική διαχείριση ενδιάμεσων αποτελεσμάτων και καλύτερη τοπικότητα στην πρόσβαση.
 
-Υλοποίηση:
+Σημεία υλοποίησης:
 
-Precomputed popcount 16-bit (64KB table, O(1) lookups)
+- Files/APIs: `pack_string_ref(...)`, `resolve_string_ref(...)`, ειδικοί comparators/hashes για `PackedStringRef`.
+- Adapter functions για συμβατότητα με υπάρχοντα modules (π.χ. `columnar` -> `row` materialization όταν χρειάζεται).
 
-Tag με 4 bits ανά tuple (παράγονται από hash στα bits 4, 12, 20, 28)
+LM Δομές & Scanning:
 
-Τα Bloom filters είναι 16-bit μάσκες ανά bucket
+- `LM_Table`: αναπαράσταση πίνακα σε column-store μορφή με πολλές στήλες (`LM_Column`) και σελίδες (`pages`).
+- `LM_Column`: ξεχωρίζει `is_int` για `int_pages` και `str_pages` για varchar.
+- `LM_IntPage` / `LM_VarcharPage`: `std::vector<int32_t>` / `std::vector<std::string>` αντίστοιχα.
+- Scanning helper: `scan_to_rowstore(Catalog&, table_id, col_ids)` για περιστασιακή υλοποίηση/επιστροφή rowstore views.
 
-Ο έλεγχος γίνεται με:
-(bloom & tag) == tag
+Columnar processing updates (σύντομο):
 
-Γιατί αυτή η επιλογή:
+- Μετακίνηση των `scan_columnar_to_columnbuffer` και `finalize_columnbuffer_to_columnar` στο `late_materialization` module για κεντρική λογική.
+- `join_columnbuffer_hash` προσαρμόστηκε ώστε να χειρίζεται το γενικό `value_t` και να υποστηρίζει numeric/varchar handlers χωρίς άσκοπες υλοποιήσεις strings.
 
-Το directory έχει ελάχιστο overhead.
+## 2. Row Store σε Column Store
 
-Το bloom είναι branchless και πάρα πολύ γρήγορο.
+* **Υλοποιήθηκε από: Σακκέτος Γεώργιος**
 
-Μειώνει σημαντικά το probe cost σε μη ταιριαστά keys.
+Το conversion από row-store σε column-store στοχεύει στη βελτίωση της απόδοσης των αναλυτικών queries με τη βελτιστοποίηση της χωρικής και χρονικής τοπικότητας των στηλών.
 
-Ακριβώς όπως περιγράφει το paper της εργασίας.
+Κύρια χαρακτηριστικά της υλοποίησης:
 
-3.3 unchained_hashtable.h
+- Column-major αποθήκευση για κάθε στήλη με συνεχή buffers και σελιδοποίηση (`pages`) για αποδοτική ανάγνωση υπο-τμημάτων.
+- Υποστήριξη fixed- και variable-length τύπων: τα fixed-size πεδία αποθηκεύονται απευθείας, ενώ τα strings διαχειρίζονται μέσω αναφορών (δείκτες/offsets) για zero-copy πρόσβαση.
+- Σύνδεση με Late Materialization: οι στήλες μπορούν να επιστρέφουν `PackedStringRef`/δείκτες ώστε η πλήρης υλοποίηση των πεδίων να γίνεται όποτε απαιτείται.
+- APIs/αρχεία:
+  - Κύριος header: `include/columnar.h`
+  - Ροή φόρτωσης/σελιδοποίησης: `src/columnar.cpp` (ή αντίστοιχο module στο `src/`)
 
-Στόχος:
-Υλοποίηση hash table χωρίς λίστες (unchained), χωρίς pointer chasing, με layout που μεγιστοποιεί locality.
+Σημεία σχεδίασης και επιπτώσεις:
 
-Υλοποίηση:
+- Μειώνει I/O και memory bandwidth για επιλεγμένες στήλες, ειδικά όταν τα queries αφορούν λίγα πεδία ανά εγγραφή.
+- Απαιτεί μετατροπή της διεπαφής ανάγνωσης/συγκέντρωσης δεδομένων (scans) ώστε να επιστρέφουν columnar views αντί για πλήρη tuples.
+- Συμβατότητα με υπάρχοντα join/hash modules μέσω μικρού adapter layer (`columnar->row` views όταν χρειάζεται).
 
-3.3.1 Directory (prefix table)
+## 3. Unchained Hashing
 
-Προκύπτει από τα υψηλά bits του hash:
-prefix = (h >> 16) & dir_mask
+* **Υλοποιήθηκε από:** **Ξενοφών Λογοθέτης**
+  Η υλοποίηση του unchained hashing ακολουθεί την προσέγγιση της ανεξάρτητης αλυσίδας (separate chaining) αλλά με βελτιστοποιήσεις για cache και resizing.
 
-Κάθε bucket έχει:
-begin_idx
-end_idx
-bloom (uint16_t)
+Κύρια χαρακτηριστικά της υλοποίησης:
 
-3.3.2 Contiguous buffer of tuples
+- Γρήγορος Fibonacci hashing για INT32 keys (`h(x) = uint64_t(x) * 11400714819323198485ULL`).
+- Προϋπολογισμένος πίνακας 16-bit popcount (65536 entries) για O(1) popcount lookups.
+- Συμπαγής unchained hashtable με prefix directory (prefix από τα υψηλά bits του hash).
+- 4-bit/16-bit Bloom filters ανά directory bucket για γρήγορο prefiltering (bitmask/tag check).
+- Contiguous buffer of tuples ανά prefix — όχι dynamic allocations ανά bucket.
+- Build-phase σε 3 περάσματα (counts → offsets → fill) και γρήγορος probe-phase με bloom reject.
+- Μικρές αλλαγές στο `execute.cpp` για ενσωμάτωση του νέου πίνακα.
 
-Ολόκληρη η δομή των tuples βρίσκεται σε ένα μεγάλο vector.
+Σημεία σχεδίασης (σύντομο):
 
-Δεν υπάρχουν malloc ανά bucket.
+- Directory/prefix: `prefix = (h >> 16) & dir_mask` — κάθε bucket έχει `begin_idx`, `end_idx`, `bloom (uint16_t)`.
+- Probe-phase: compute hash → locate prefix → bloom filter reject → return pointer+length για candidate range.
+- Exact-match comparisons γίνονται στον `JoinOperator`, το hashtable επιστρέφει το candidate range.
 
-Η πρόσβαση σε όλα τα tuples που έχουν το ίδιο prefix είναι συνεχόμενη.
+Tests / verification:
 
-3.3.3 Build-phase (3 περάσματα)
-
-Υπολογισμός prefix counts
-
-Prefix offsets
-
-Γέμισμα των tuples στο σωστό prefix range + ενημέρωση bloom
-
-3.3.4 Probe-phase
-
-Υπολογίζουμε hash
-
-Βρίσκουμε bucket μέσω prefix
-
-Bloom filter reject (πολύ συχνό)
-
-Επιστρέφουμε pointer + length στη σωστή περιοχή tuples
-
-3.3.5 Exact match
-Το hashtable δεν συγκρίνει ίδια τα keys. Αυτό γίνεται στον JoinOperator. Το paper περιγράφει ότι η σωστή μοντελοποίηση είναι:
-
-Το directory επιτρέπει τον γρήγορο εντοπισμό του candidate range
-
-Η ήδη μικρή λίστα συγκρίνεται από τον caller
-
-Γιατί αυτή η επιλογή:
-
-Καμία pointer-based δομή (όπως std::unordered_map)
-
-Καλύτερη locality
-
-Πολύ καλύτερη συμπεριφορά όταν υπάρχουν πολλά duplicate keys
-
-Αμελητέο memory overhead
-
-Πλήρως ευθυγραμμισμένο με τις αρχές του paper
-
-3.4 execute.cpp (JoinAlgorithm integration)
-
-Στόχος:
-Αντικατάσταση της unordered_map από custom UnchainedHashTable.
-
-Υλοποίηση:
-
-Η πλευρά build μετατρέπει τις εγγραφές σε:
-vector<pair<key,row_id>>
-
-Το hashtable χτίζεται με build_from_entries
-
-Η πλευρά probe καλεί:
-probe(key,len)
-
-Για κάθε candidate entry επιβεβαιώνεται το key match και δημιουργείται το join output row
-
-Γιατί αυτή η επιλογή:
-
-Το join operator παραμένει συμβατός με το αρχικό API.
-
-Δεν αλλάζει ο execution engine.
-
-Όλη η επιτάχυνση γίνεται στο hashing layer.
-
-Το join πλέον δεν κάνει dynamic allocations ούτε hash lookups στο unordered_map.
-
-3.5 test.cpp (unit tests)
-
-Στόχος:
-Δημιουργία απλών, compiler-only tests χωρίς frameworks.
-
-Δοκιμές:
-
-Bloom tag correctness
-
-Bloom maybe_contains correctness
-
-False positive rate σε 16-bit bloom
-
-Fibonacci hashing correctness & distribution uniformity
-
-Build + probe basic
-
-Heavy collision buckets (όλα τα keys ίδιο prefix)
-
-Large scale test (100k tuples)
-
-Αποτέλεσμα:
-Όλες οι δοκιμές περνούν.
-
-
-
-/* PART 1 */
-# Late Materialization (LM) – Αναλυτική Τεκμηρίωση
-
-Το Late Materialization (LM) είναι τεχνική εκτέλεσης ερωτημάτων που επιτρέπει στο σύστημα να *μην υλοποιεί* (materialize) ακριβές τιμές τύπου `VARCHAR` μέχρι να χρειαστεί πραγματικά.  
-Αντί να αντιγράφονται strings κατά τη διάρκεια των scans και joins, το σύστημα χρησιμοποιεί compact references (`PackedStringRef` / `StringRef`).
-Αυτό μειώνει την κατανάλωση μνήμης και βελτιώνει σημαντικά την απόδοση.
-
-# Βασική Ιδέα
-
-# INT32 τιμές → Υλοποιούνται άμεσα  
-# VARCHAR τιμές → *ΔΕΝ υλοποιούνται*
-
-Αντί για string, αποθηκεύεται μία 64-bit packed αναφορά που περιλαμβάνει:
-- table_id  
-- column_id  
-- page_id  
-- offset  
-- flags (null, long-string)
-
-Η πραγματική συμβολοσειρά ανασύρεται μόνο στην τελική φάση.
-
-#  Δομές LM
-## LM_Table
-Αναπαριστά έναν πίνακα σε column-store μορφή.  
-Έχει πολλές στήλες (`LM_Column`), κάθε μία με πολλές σελίδες (pages).
-
-## LM_Column
-- `is_int = true` → `int_pages`  
-- `is_int = false` → `str_pages`
-
-## LM_IntPage / LM_VarcharPage
-Αποθηκεύουν πραγματικές τιμές:
-- `std::vector<int32_t>`
-- `std::vector<std::string>`
-
-# Scanning: `scan_to_rowstore()`
-Η συνάρτηση:
-scan_to_rowstore(Catalog&, table_id, col_ids)
-
+- Unit tests καλύπτουν bloom/tag correctness, fibonacci hashing distribution, build+probe, heavy collisions και large-scale tests (π.χ. 100k tuples).
+- Οι δοκιμές εκτελούνται από το `software_tester` και περνούν στο repo.
