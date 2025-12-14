@@ -9,6 +9,27 @@ namespace Contest {
 
 extern Table& GetTable(size_t table_id); 
 
+size_t StringRefHash::operator()(const PackedStringRef& k) const {
+    if (plan == nullptr) return std::hash<uint64_t>{}(k.raw);
+    StringRefResolver resolver(plan);
+    std::string tmp;
+    auto [ptr, len] = resolver.resolve(k.raw, tmp);
+    if (!ptr) return std::hash<uint64_t>{}(k.raw);
+    return std::hash<std::string_view>{}(std::string_view(ptr, len));
+}
+
+bool StringRefEq::operator()(const PackedStringRef& a, const PackedStringRef& b) const {
+    if (a.raw == b.raw) return true;
+    if (plan == nullptr) return false;
+    StringRefResolver resolver(plan);
+    std::string ta, tb;
+    auto [pa, la] = resolver.resolve(a.raw, ta);
+    auto [pb, lb] = resolver.resolve(b.raw, tb);
+    if (!pa || !pb) return false;
+    if (la != lb) return false;
+    return std::string_view(pa, la) == std::string_view(pb, lb);
+}
+
 // ----------------------------------------------------------------------------
 // SCAN
 // ----------------------------------------------------------------------------
@@ -77,8 +98,10 @@ ColumnBuffer scan_columnar_to_columnbuffer(
                 case DataType::VARCHAR: {
                     if (num_rows_in_page == 0xffff) {
                         out_col.append(value_t::make_str_ref((uint8_t)table_id, static_cast<uint8_t>(in_col_idx), static_cast<uint32_t>(page_idx), 0xffff));
+                        // first page of a long string: single row reference
                     } else if (num_rows_in_page == 0xfffe) {
-                        out_col.append(value_t::make_null());
+                        // continuation page for a long string: no row starts here
+                        // skip appending anything for continuation pages
                     } else {
                         auto* bitmap = reinterpret_cast<const uint8_t*>(page + PAGE_SIZE - (num_rows_in_page + 7) / 8);
                         uint16_t data_idx = 0;
@@ -121,9 +144,21 @@ std::pair<const char*, size_t> StringRefResolver::resolve(uint64_t raw_ref, std:
     auto* page_data = column.pages[ref.parts.page_idx]->data;
     
     uint16_t num_rows = *reinterpret_cast<const uint16_t*>(page_data);
-    
+
     if (num_rows == 0xffff || num_rows == 0xfffe) {
-        buffer = "LONG_STR_PLACEHOLDER";
+        // Long string stored across one or more pages. Concatenate all
+        // successive long-string pages starting at page_idx.
+        buffer.clear();
+        size_t cur_page = ref.parts.page_idx;
+        while (cur_page < column.pages.size()) {
+            auto* p = column.pages[cur_page]->data;
+            uint16_t nr = *reinterpret_cast<const uint16_t*>(p);
+            if (nr != 0xffff && nr != 0xfffe) break;
+            uint16_t chunk_len = *reinterpret_cast<const uint16_t*>(p + 2);
+            const char* chunk_ptr = reinterpret_cast<const char*>(p + 4);
+            buffer.append(chunk_ptr, chunk_len);
+            ++cur_page;
+        }
         return {buffer.data(), buffer.size()};
     }
     
@@ -199,12 +234,48 @@ ColumnarTable finalize_columnbuffer_to_columnar(
             for (size_t row_idx = 0; row_idx < buf.num_rows; ++row_idx) {
                 const auto& v = buf.columns[col_idx].get(row_idx);
 
-                if (!v.is_null()) {
-                    auto [ptr, len] = resolver.resolve(v.as_ref(), tmp_buf);
-                    if (ptr != nullptr) inserter.insert(std::string_view(ptr, len));
-                    else inserter.insert_null();
-                } else {
+                if (v.is_null()) {
                     inserter.insert_null();
+                    continue;
+                }
+
+                // Try fast-path: interpret the packed string ref and point
+                // directly into the source page for short strings. Only use
+                // the resolver (which may allocate) for long/continued pages.
+                const uint64_t raw = v.as_ref();
+                PackedStringRef pref = PackedStringRef::unpack(raw);
+                const char* ptr = nullptr;
+                size_t len = 0;
+
+                if (pref.parts.table_id < plan.inputs.size()) {
+                    const ColumnarTable& src_ct = plan.inputs[pref.parts.table_id];
+                    if (pref.parts.col_id < src_ct.columns.size()) {
+                        const auto& src_col = src_ct.columns[pref.parts.col_id];
+                        if (pref.parts.page_idx < src_col.pages.size()) {
+                            auto* page_data = src_col.pages[pref.parts.page_idx]->data;
+                            uint16_t num_rows_in_page = *reinterpret_cast<const uint16_t*>(page_data);
+                            // Short-string page
+                            if (num_rows_in_page != 0xffff && num_rows_in_page != 0xfffe
+                                && pref.parts.slot_idx < *reinterpret_cast<const uint16_t*>(page_data + 2)) {
+                                uint16_t num_offsets = *reinterpret_cast<const uint16_t*>(page_data + 2);
+                                auto* offsets = reinterpret_cast<const uint16_t*>(page_data + 4);
+                                size_t offsets_end = 4 + num_offsets * 2;
+                                uint16_t start_offset = (pref.parts.slot_idx == 0) ? 0 : offsets[pref.parts.slot_idx - 1];
+                                uint16_t end_offset = offsets[pref.parts.slot_idx];
+                                len = static_cast<size_t>(end_offset - start_offset);
+                                ptr = reinterpret_cast<const char*>(page_data + offsets_end + start_offset);
+                            }
+                        }
+                    }
+                }
+
+                if (ptr != nullptr) {
+                    inserter.insert(std::string_view(ptr, len));
+                } else {
+                    // Fallback: use resolver for long strings or when fast-path fails
+                    auto [rptr, rlen] = resolver.resolve(v.as_ref(), tmp_buf);
+                    if (rptr != nullptr) inserter.insert(std::string_view(rptr, rlen));
+                    else inserter.insert_null();
                 }
             }
             inserter.finalize();

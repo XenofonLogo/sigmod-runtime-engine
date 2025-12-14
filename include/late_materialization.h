@@ -44,16 +44,19 @@ struct PackedStringRef {
 typedef PackedStringRef StringRef; 
 
 // 3. Hash & Equality functors
+// forward-declare resolver used by hash/eq
+struct StringRefResolver;
+
 struct StringRefHash {
     const Plan* plan;
     StringRefHash(const Plan* p) : plan(p) {} 
-    size_t operator()(const PackedStringRef& k) const { return std::hash<uint64_t>{}(k.raw); }
+    size_t operator()(const PackedStringRef& k) const;
 };
 
 struct StringRefEq {
     const Plan* plan;
     StringRefEq(const Plan* p) : plan(p) {}
-    bool operator()(const PackedStringRef& a, const PackedStringRef& b) const { return a.raw == b.raw; }
+    bool operator()(const PackedStringRef& a, const PackedStringRef& b) const;
 };
 
 // 4. value_t (compact 64-bit payload)
