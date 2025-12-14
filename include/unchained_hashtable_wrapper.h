@@ -9,7 +9,10 @@
 
 namespace Contest {
 
-
+template <typename Key>
+class UnchainedHashTableWrapper : public IHashTable<Key> {
+private:
+    UnchainedHashTable<Key> table_;
 
 public:
     // Implementation of IHashTable methods

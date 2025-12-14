@@ -7,6 +7,13 @@
 
 namespace Contest {
 
+// H get_bitmap_local_col αφαιρέθηκε από εδώ επειδή μετακινήθηκε στο columnar.h
+
+// Οι scan_columnar_to_columnbuffer και finalize_columnbuffer_to_columnar
+// αφαιρέθηκαν από εδώ επειδή μετακινήθηκαν στο late_materialization.cpp
+
+// Υλοποίηση μόνο της join_columnbuffer_hash (αν χρειάζεται για tests ή legacy code)
+// Ενημερωμένη για να συμβαδίζει με το νέο value_t
 ColumnBuffer join_columnbuffer_hash(const Plan& plan,
     const JoinNode& join,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs,
@@ -84,6 +91,7 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
 
         for (size_t i = 0; i < build_buf.num_rows; ++i) {
             const auto& v = build_buf.columns[build_key_idx].get(i);
+            // Προσοχή: Ελέγχουμε για STR_REF που παράγει το scan
             if (!v.is_null()) {
                 ht[Contest::PackedStringRef::unpack(v.as_ref())].push_back(i);
             }
