@@ -701,47 +701,47 @@ using namespace Contest;
 // INDEXING OPTIMIZATION TESTS
 // -----------------------------------------------------------------------------
 
-// TEST_CASE(
-//     "Indexing optimization: INT32 column without NULLs uses zero-copy",
-//     "[indexing][zero-copy]"
-// ) {
-//     // Table: INT32 χωρίς NULLs
-//     std::vector<std::vector<Data>> data = {
-//         {1}, {2}, {3}, {4}, {5}
-//     };
-//     std::vector<DataType> types = { DataType::INT32 };
+TEST_CASE(
+    "Indexing optimization: INT32 column without NULLs uses zero-copy",
+    "[indexing][zero-copy]"
+) {
+    // Table: INT32 χωρίς NULLs
+    std::vector<std::vector<Data>> data = {
+        {1}, {2}, {3}, {4}, {5}
+    };
+    std::vector<DataType> types = { DataType::INT32 };
 
-//     Table table(data, types);
-//     ColumnarTable columnar = table.to_columnar();
+    Table table(data, types);
+    ColumnarTable columnar = table.to_columnar();
 
-//     // Plan + Scan
-//     Plan plan;
-//     plan.inputs.emplace_back(std::move(columnar));
+    // Plan + Scan
+    Plan plan;
+    plan.inputs.emplace_back(std::move(columnar));
 
-//     ScanNode scan;
-//     scan.base_table_id = 0;
+    ScanNode scan;
+    scan.base_table_id = 0;
 
-//     std::vector<std::tuple<size_t, DataType>> output_attrs = {
-//         {0, DataType::INT32}
-//     };
+    std::vector<std::tuple<size_t, DataType>> output_attrs = {
+        {0, DataType::INT32}
+    };
 
-//     ColumnBuffer buf =
-//         scan_columnar_to_columnbuffer(plan, scan, output_attrs);
+    ColumnBuffer buf =
+        scan_columnar_to_columnbuffer(plan, scan, output_attrs);
 
-//     REQUIRE(buf.num_rows == 5);
-//     REQUIRE(buf.columns.size() == 1);
+    REQUIRE(buf.num_rows == 5);
+    REQUIRE(buf.columns.size() == 1);
 
-//     const auto& col = buf.columns[0];
+    const auto& col = buf.columns[0];
 
-//     // ---- ΚΡΙΣΙΜΟΙ ΕΛΕΓΧΟΙ ----
-//     REQUIRE(col.is_zero_copy == true);
-//     REQUIRE(col.src_column != nullptr);
+    // ---- ΚΡΙΣΙΜΟΙ ΕΛΕΓΧΟΙ ----
+    REQUIRE(col.is_zero_copy == true);
+    REQUIRE(col.src_column != nullptr);
 
-//     // ---- ΣΩΣΤΗ ΑΝΑΓΝΩΣΗ ΤΙΜΩΝ ----
-//     for (size_t i = 0; i < 5; ++i) {
-//         REQUIRE(col.get(i).as_i32() == static_cast<int32_t>(i + 1));
-//     }
-// }
+    // ---- ΣΩΣΤΗ ΑΝΑΓΝΩΣΗ ΤΙΜΩΝ ----
+    for (size_t i = 0; i < 5; ++i) {
+        REQUIRE(col.get(i).as_i32() == static_cast<int32_t>(i + 1));
+    }
+}
 
 // -----------------------------------------------------------------------------
 
@@ -814,4 +814,149 @@ TEST_CASE(
 
     REQUIRE(buf.columns.size() == 1);
     REQUIRE(buf.columns[0].is_zero_copy == false);
+}
+
+TEST_CASE(
+    "Indexing optimization: zero-copy works across multiple pages",
+    "[indexing][zero-copy][pages]"
+) {
+    // Δημιουργούμε αρκετές γραμμές ώστε να σπάσουν σε πολλές pages
+    std::vector<std::vector<Data>> data;
+    for (int i = 0; i < 5000; ++i) {
+        data.push_back({ i });
+    }
+
+    std::vector<DataType> types = { DataType::INT32 };
+
+    Table table(data, types);
+    ColumnarTable columnar = table.to_columnar();
+
+    Plan plan;
+    plan.inputs.emplace_back(std::move(columnar));
+
+    ScanNode scan{ .base_table_id = 0 };
+
+    ColumnBuffer buf =
+        scan_columnar_to_columnbuffer(plan, scan, {{0, DataType::INT32}});
+
+    const auto& col = buf.columns[0];
+
+    REQUIRE(col.is_zero_copy == true);
+    REQUIRE(col.src_column != nullptr);
+    REQUIRE(buf.num_rows == 5000);
+
+    // Έλεγχος αρχής, μέσης και τέλους
+    REQUIRE(col.get(0).as_i32() == 0);
+    REQUIRE(col.get(1234).as_i32() == 1234);
+    REQUIRE(col.get(4999).as_i32() == 4999);
+}
+
+TEST_CASE(
+    "Indexing optimization: empty INT32 column still zero-copy",
+    "[indexing][zero-copy][empty]"
+) {
+    std::vector<std::vector<Data>> data = {};
+    std::vector<DataType> types = { DataType::INT32 };
+
+    Table table(data, types);
+    ColumnarTable columnar = table.to_columnar();
+
+    Plan plan;
+    plan.inputs.emplace_back(std::move(columnar));
+
+    ScanNode scan{ .base_table_id = 0 };
+
+    ColumnBuffer buf =
+        scan_columnar_to_columnbuffer(plan, scan, {{0, DataType::INT32}});
+
+    REQUIRE(buf.num_rows == 0);
+    REQUIRE(buf.columns.size() == 1);
+
+    const auto& col = buf.columns[0];
+    REQUIRE(col.is_zero_copy == true);
+    REQUIRE(col.src_column != nullptr);
+}
+
+TEST_CASE(
+    "Indexing optimization: mixed columns (INT32 zero-copy + VARCHAR materialized)",
+    "[indexing][mixed]"
+) {
+    using namespace std::string_literals;
+
+    std::vector<std::vector<Data>> data = {
+        {1, "a"s},
+        {2, "b"s},
+        {3, "c"s}
+    };
+
+    std::vector<DataType> types = {
+        DataType::INT32,
+        DataType::VARCHAR
+    };
+
+    Table table(data, types);
+    ColumnarTable columnar = table.to_columnar();
+
+    Plan plan;
+    plan.inputs.emplace_back(std::move(columnar));
+
+    ScanNode scan{ .base_table_id = 0 };
+
+    ColumnBuffer buf =
+        scan_columnar_to_columnbuffer(
+            plan,
+            scan,
+            {
+                {0, DataType::INT32},
+                {1, DataType::VARCHAR}
+            }
+        );
+
+    REQUIRE(buf.columns.size() == 2);
+
+    const auto& int_col = buf.columns[0];
+    const auto& str_col = buf.columns[1];
+
+    // INT32 → zero-copy
+    REQUIRE(int_col.is_zero_copy == true);
+    REQUIRE(int_col.src_column != nullptr);
+    REQUIRE(int_col.get(1).as_i32() == 2);
+
+    // VARCHAR → materialized
+    REQUIRE(str_col.is_zero_copy == false);
+    REQUIRE(str_col.src_column == nullptr);
+}
+TEST_CASE(
+    "Indexing optimization: INT32 with NULL in later page disables zero-copy",
+    "[indexing][nulls][pages]"
+) {
+    std::vector<std::vector<Data>> data;
+
+    // Πολλές non-null τιμές
+    for (int i = 0; i < 3000; ++i) {
+        data.push_back({ i });
+    }
+
+    // NULL αργότερα
+    data.push_back({ std::monostate{} });
+
+    std::vector<DataType> types = { DataType::INT32 };
+
+    Table table(data, types);
+    ColumnarTable columnar = table.to_columnar();
+
+    Plan plan;
+    plan.inputs.emplace_back(std::move(columnar));
+
+    ScanNode scan{ .base_table_id = 0 };
+
+    ColumnBuffer buf =
+        scan_columnar_to_columnbuffer(plan, scan, {{0, DataType::INT32}});
+
+    const auto& col = buf.columns[0];
+
+    REQUIRE(col.is_zero_copy == false);
+    REQUIRE(col.src_column == nullptr);
+
+    REQUIRE(col.get(3000).is_null());
 }
