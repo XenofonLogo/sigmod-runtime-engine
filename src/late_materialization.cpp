@@ -5,6 +5,7 @@
 #include <table.h>
 #include <iostream>
 #include <fstream>
+#include <column_zero_copy.h>
 
 namespace Contest {
 
@@ -64,23 +65,11 @@ ColumnBuffer scan_columnar_to_columnbuffer(
         // ============================================================
         // ZERO-COPY PATH for INT32 without nulls
         // ============================================================
-        if (column.type == DataType::INT32 && !column_has_nulls(column)) {
-            out_col.is_zero_copy = true;
-            out_col.src_column = &column;
-            out_col.num_values = input_columnar.num_rows;
-            
-            // Build page offsets for fast lookup
-            out_col.page_offsets.push_back(0);
-            size_t cumulative = 0;
-            for (const auto& page_ptr : column.pages) {
-                auto* page = page_ptr->data;
-                uint16_t num_rows = *reinterpret_cast<const uint16_t*>(page);
-                cumulative += num_rows;
-                out_col.page_offsets.push_back(cumulative);
-            }
-            
-            continue; // Skip materialization
-        }
+        if (can_zero_copy_int32(column)) {
+    init_zero_copy_column(out_col, column, input_columnar.num_rows);
+    continue;
+}
+
 
         // ============================================================
         // FALLBACK materialization
