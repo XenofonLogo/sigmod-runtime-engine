@@ -8,18 +8,27 @@
 
 namespace Contest {
 
-// Helper function to read bitmap (moved to header to be visible to late_materialization.cpp)
+// Helper function to read bitmap
 static inline bool get_bitmap_local_col(const uint8_t* bitmap, uint16_t idx) {
     auto byte_idx = idx / 8;
     auto bit = idx % 8;
     return bitmap[byte_idx] & (1u << bit);
 }
 
-// Column store
+// Column store with smart zero-copy
 struct column_t {
     std::vector<std::vector<value_t>> pages;
+
+    // Zero-copy mode for INT32 without nulls
+    const Column* src_column = nullptr;
+    std::vector<size_t> page_offsets;  // Cumulative row counts per page
+    bool is_zero_copy = false;
+
     size_t values_per_page = 1024;
     size_t num_values = 0;
+
+    // CACHE for sequential access optimization
+    mutable size_t cached_page_idx = 0;
 
     column_t() = default;
     explicit column_t(size_t page_size) : values_per_page(page_size), num_values(0) {}
@@ -34,6 +43,53 @@ struct column_t {
     }
 
     const value_t& get(size_t row_idx) const {
+        // ZERO-COPY PATH with cached page lookup
+        if (is_zero_copy && src_column != nullptr) {
+            static thread_local value_t tmp;
+            
+            // Start search from cached page (exploits sequential access)
+            size_t page_idx = cached_page_idx;
+            
+            // Check if row is in cached page
+            if (page_idx < page_offsets.size() - 1 &&
+                row_idx >= page_offsets[page_idx] &&
+                row_idx < page_offsets[page_idx + 1]) {
+                // Cache hit! Use cached page
+            }
+            // Check next page (very common in sequential scans)
+            else if (page_idx + 1 < page_offsets.size() - 1 &&
+                     row_idx >= page_offsets[page_idx + 1] &&
+                     row_idx < page_offsets[page_idx + 2]) {
+                cached_page_idx = ++page_idx;
+            }
+            // Binary search for the page
+            else {
+                // Binary search in page_offsets
+                size_t left = 0, right = page_offsets.size() - 1;
+                while (left < right - 1) {
+                    size_t mid = (left + right) / 2;
+                    if (row_idx < page_offsets[mid]) {
+                        right = mid;
+                    } else {
+                        left = mid;
+                    }
+                }
+                page_idx = left;
+                cached_page_idx = page_idx;
+            }
+            
+            // Calculate slot within the page
+            size_t slot = row_idx - page_offsets[page_idx];
+            
+            // Read directly from the source page
+            auto* page = src_column->pages[page_idx]->data;
+            auto* data = reinterpret_cast<const int32_t*>(page + 4);
+            
+            tmp = value_t::make_i32(data[slot]);
+            return tmp;
+        }
+
+        // STANDARD PATH: Access materialized data
         size_t page_idx = row_idx / values_per_page;
         size_t offset_in_page = row_idx % values_per_page;
         return pages[page_idx][offset_in_page];
