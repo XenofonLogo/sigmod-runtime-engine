@@ -1,9 +1,9 @@
 
-     #include "columnar.h"
-#include "late_materialization.h"
-#include <cstring>
-#include <algorithm>
-#include <unordered_map>
+    #include "columnar.h"
+    #include "late_materialization.h"
+    #include "parallel_unchained_hashtable.h"
+    #include <cstring>
+    #include <algorithm>
 
 namespace Contest {
 
@@ -34,82 +34,83 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
         ++out.num_rows;
     };
 
-    auto join_numeric = [&](auto tag, bool build_left_side) {
-        using T = decltype(tag);
-        std::unordered_map<T, std::vector<size_t>> ht;
-        
-        // Build
+    // Numeric join (INT32 only)
+    auto join_numeric = [&](bool build_left_side) {
+        using T = int32_t;
+
         const ColumnBuffer& build_buf = build_left_side ? left : right;
         size_t build_key_idx = build_left_side ? join.left_attr : join.right_attr;
-        
-        for (size_t i = 0; i < build_buf.num_rows; ++i) {
+
+        std::vector<std::pair<T, std::size_t>> entries;
+        entries.reserve(build_buf.num_rows);
+        for (std::size_t i = 0; i < build_buf.num_rows; ++i) {
             const auto& v = build_buf.columns[build_key_idx].get(i);
-            if constexpr (std::is_same_v<T, int32_t>) {
-                if (!v.is_null()) ht[v.as_i32()].push_back(i);
-            } else if constexpr (std::is_same_v<T, int64_t>) {
-                if (!v.is_null()) ht[v.as_i64()].push_back(i);
-            } else if constexpr (std::is_same_v<T, double>) {
-                if (!v.is_null()) ht[v.as_f64()].push_back(i);
-            }
+            if (v.is_null()) continue;
+            entries.emplace_back(v.as_i32(), i);
         }
 
-        // Probe
+        UnchainedHashTable<T> ht;
+        ht.build_from_entries(entries);
+
         const ColumnBuffer& probe_buf = build_left_side ? right : left;
         size_t probe_key_idx = build_left_side ? join.right_attr : join.left_attr;
 
-        for (size_t j = 0; j < probe_buf.num_rows; ++j) {
+        for (std::size_t j = 0; j < probe_buf.num_rows; ++j) {
             const auto& v = probe_buf.columns[probe_key_idx].get(j);
-            bool match = false;
-            typename std::unordered_map<T, std::vector<size_t>>::iterator it;
+            if (v.is_null()) continue;
 
-            if constexpr (std::is_same_v<T, int32_t>) {
-                if (!v.is_null()) { match = true; it = ht.find(v.as_i32()); }
-            } else if constexpr (std::is_same_v<T, int64_t>) {
-                if (!v.is_null()) { match = true; it = ht.find(v.as_i64()); }
-            } else if constexpr (std::is_same_v<T, double>) {
-                if (!v.is_null()) { match = true; it = ht.find(v.as_f64()); }
-            }
+            T probe_key = v.as_i32();
 
-            if (match && it != ht.end()) {
-                for (auto build_idx : it->second) {
-                    if (build_left_side) emit_pair(build_idx, j);
-                    else emit_pair(j, build_idx);
+            std::size_t len = 0;
+            const auto* base = ht.probe(probe_key, len);
+            if (!base) continue;
+
+            for (std::size_t k = 0; k < len; ++k) {
+                if (base[k].key == probe_key) {
+                    if (build_left_side) emit_pair(base[k].row_id, j);
+                    else emit_pair(j, base[k].row_id);
                 }
             }
         }
     };
 
     auto join_varchar = [&](bool build_left_side) {
-        using Key = Contest::StringRef; // Use the typedef from late_materialization.h
-        Contest::StringRefHash hasher(&plan);
-        Contest::StringRefEq eq(&plan);
-        std::unordered_map<Key, std::vector<size_t>, Contest::StringRefHash, Contest::StringRefEq> ht(1024, hasher, eq);
-        
-        // Build
+        // We'll hash on the packed 64-bit reference (raw). This mirrors
+        // the scan which produces PackedStringRef values and keeps
+        // materialization for the end.
+
         const ColumnBuffer& build_buf = build_left_side ? left : right;
         size_t build_key_idx = build_left_side ? join.left_attr : join.right_attr;
 
-        for (size_t i = 0; i < build_buf.num_rows; ++i) {
+        std::vector<std::pair<uint64_t, std::size_t>> entries;
+        entries.reserve(build_buf.num_rows);
+
+        for (std::size_t i = 0; i < build_buf.num_rows; ++i) {
             const auto& v = build_buf.columns[build_key_idx].get(i);
-            // Προσοχή: Ελέγχουμε για STR_REF που παράγει το scan
-            if (!v.is_null()) {
-                ht[Contest::PackedStringRef::unpack(v.as_ref())].push_back(i);
-            }
+            if (v.is_null()) continue;
+            entries.emplace_back(v.as_ref(), i);
         }
 
-        // Probe
+        UnchainedHashTable<uint64_t> ht;
+        ht.build_from_entries(entries);
+
+        // Probe side
         const ColumnBuffer& probe_buf = build_left_side ? right : left;
         size_t probe_key_idx = build_left_side ? join.right_attr : join.left_attr;
 
-        for (size_t j = 0; j < probe_buf.num_rows; ++j) {
+        for (std::size_t j = 0; j < probe_buf.num_rows; ++j) {
             const auto& v = probe_buf.columns[probe_key_idx].get(j);
-            if (!v.is_null()) {
-                auto it = ht.find(Contest::PackedStringRef::unpack(v.as_ref()));
-                if (it != ht.end()) {
-                    for (auto build_idx : it->second) {
-                        if (build_left_side) emit_pair(build_idx, j);
-                        else emit_pair(j, build_idx);
-                    }
+            if (v.is_null()) continue;
+
+            uint64_t key = v.as_ref();
+            std::size_t len = 0;
+            const auto* base = ht.probe(key, len);
+            if (!base) continue;
+
+            for (std::size_t k = 0; k < len; ++k) {
+                if (base[k].key == key) {
+                    if (build_left_side) emit_pair(base[k].row_id, j);
+                    else emit_pair(j, base[k].row_id);
                 }
             }
         }
@@ -118,10 +119,9 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
     DataType key_type = join.build_left ? std::get<1>(plan.nodes[join.left].output_attrs[join.left_attr])
                                         : std::get<1>(plan.nodes[join.right].output_attrs[join.right_attr]);
     switch (key_type) {
-        case DataType::INT32:   join_numeric(int32_t{}, join.build_left); break;
-        case DataType::INT64:   join_numeric(int64_t{}, join.build_left); break;
-        case DataType::FP64:    join_numeric(double{}, join.build_left); break;
+        case DataType::INT32:   join_numeric(join.build_left); break;
         case DataType::VARCHAR: join_varchar(join.build_left); break;
+        default: break;
     }
 
     return out;
