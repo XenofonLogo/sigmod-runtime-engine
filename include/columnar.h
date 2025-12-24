@@ -2,60 +2,37 @@
 
 #include <vector>
 #include <cstddef>
-
 #include "plan.h"
 #include "table.h"
 #include "late_materialization.h"
 
 namespace Contest {
 
-// ============================================================================
-//  Helper: Ανάγνωση bitmap (true = non-null)
-// ============================================================================
+// Helper function to read bitmap
 static inline bool get_bitmap_local_col(const uint8_t* bitmap, uint16_t idx) {
-    size_t byte_idx = idx / 8;
-    size_t bit_idx  = idx % 8;
-    return bitmap[byte_idx] & (1u << bit_idx);
+    auto byte_idx = idx / 8;
+    auto bit = idx % 8;
+    return bitmap[byte_idx] & (1u << bit);
 }
 
-// ============================================================================
-//  column_t
-// ============================================================================
-//
-//  Λογική αναπαράσταση στήλης κατά την εκτέλεση:
-//   - είτε materialized (pages<vector<value_t>>)
-//   - είτε zero-copy (INT32 χωρίς NULLs)
-//
+// Column store with smart zero-copy
 struct column_t {
-
-    // ----------------------------------------------------------------
-    // Materialized δεδομένα
-    // ----------------------------------------------------------------
     std::vector<std::vector<value_t>> pages;
 
-    // ----------------------------------------------------------------
-    // Zero-copy δεδομένα
-    // ----------------------------------------------------------------
-    const Column* src_column = nullptr;      // pointer στο input Column
-    std::vector<size_t> page_offsets;        // cumulative rows ανά page
+    // Zero-copy mode for INT32 without nulls
+    const Column* src_column = nullptr;
+    std::vector<size_t> page_offsets;  // Cumulative row counts per page
     bool is_zero_copy = false;
 
-    // ----------------------------------------------------------------
-    // Metadata
-    // ----------------------------------------------------------------
     size_t values_per_page = 1024;
     size_t num_values = 0;
 
-    // Cache για γρήγορη σειριακή πρόσβαση
+    // CACHE for sequential access optimization
     mutable size_t cached_page_idx = 0;
 
     column_t() = default;
-    explicit column_t(size_t page_size)
-        : values_per_page(page_size), num_values(0) {}
+    explicit column_t(size_t page_size) : values_per_page(page_size), num_values(0) {}
 
-    // ----------------------------------------------------------------
-    // Materialized append
-    // ----------------------------------------------------------------
     void append(const value_t& v) {
         if (pages.empty() || pages.back().size() >= values_per_page) {
             pages.emplace_back();
@@ -65,119 +42,86 @@ struct column_t {
         ++num_values;
     }
 
-    // ----------------------------------------------------------------
-    // Ανάγνωση τιμής
-    // ----------------------------------------------------------------
     const value_t& get(size_t row_idx) const {
-
-        // =============================================================
-        // ZERO-COPY PATH
-        // =============================================================
+        // ZERO-COPY PATH with cached page lookup
         if (is_zero_copy && src_column != nullptr) {
-
-            // thread_local για ασφαλή επιστροφή reference
             static thread_local value_t tmp;
-
+            
+            // Start search from cached page (exploits sequential access)
             size_t page_idx = cached_page_idx;
-
-            // Cache hit
-            if (page_idx + 1 < page_offsets.size() &&
+            
+            // Check if row is in cached page
+            if (page_idx < page_offsets.size() - 1 &&
                 row_idx >= page_offsets[page_idx] &&
-                row_idx <  page_offsets[page_idx + 1]) {
-                // ok
+                row_idx < page_offsets[page_idx + 1]) {
+                // Cache hit! Use cached page
             }
-            // Cache +1
-            else if (page_idx + 2 < page_offsets.size() &&
+            // Check next page (very common in sequential scans)
+            else if (page_idx + 1 < page_offsets.size() - 1 &&
                      row_idx >= page_offsets[page_idx + 1] &&
-                     row_idx <  page_offsets[page_idx + 2]) {
+                     row_idx < page_offsets[page_idx + 2]) {
                 cached_page_idx = ++page_idx;
             }
-            // Binary search
+            // Binary search for the page
             else {
-                size_t l = 0, r = page_offsets.size() - 1;
-                while (l < r - 1) {
-                    size_t m = (l + r) / 2;
-                    if (row_idx < page_offsets[m]) r = m;
-                    else l = m;
+                // Binary search in page_offsets
+                size_t left = 0, right = page_offsets.size() - 1;
+                while (left < right - 1) {
+                    size_t mid = (left + right) / 2;
+                    if (row_idx < page_offsets[mid]) {
+                        right = mid;
+                    } else {
+                        left = mid;
+                    }
                 }
-                page_idx = l;
-                cached_page_idx = l;
+                page_idx = left;
+                cached_page_idx = page_idx;
             }
-
+            
+            // Calculate slot within the page
             size_t slot = row_idx - page_offsets[page_idx];
-
-            const uint8_t* page =
-                reinterpret_cast<const uint8_t*>(
-                    src_column->pages[page_idx]->data);
-
-            const int32_t* data =
-                reinterpret_cast<const int32_t*>(page + 4);
-
+            
+            // Read directly from the source page
+            auto* page = src_column->pages[page_idx]->data;
+            auto* data = reinterpret_cast<const int32_t*>(page + 4);
+            
             tmp = value_t::make_i32(data[slot]);
             return tmp;
         }
 
-        // =============================================================
-        // MATERIALIZED PATH
-        // =============================================================
+        // STANDARD PATH: Access materialized data
         size_t page_idx = row_idx / values_per_page;
-        size_t offset   = row_idx % values_per_page;
-        return pages[page_idx][offset];
+        size_t offset_in_page = row_idx % values_per_page;
+        return pages[page_idx][offset_in_page];
     }
 
-    // ----------------------------------------------------------------
-    // Iterators
-    // ----------------------------------------------------------------
     class Iterator {
     public:
-        Iterator(const column_t* col, size_t idx)
-            : column(col), row_idx(idx) {}
-
-        const value_t& operator*() const {
-            return column->get(row_idx);
-        }
-
-        Iterator& operator++() {
-            ++row_idx;
-            return *this;
-        }
-
-        bool operator!=(const Iterator& other) const {
-            return row_idx != other.row_idx;
-        }
-
+        Iterator(const column_t* col, size_t idx) : column(col), row_idx(idx) {}
+        const value_t& operator*() const { return column->get(row_idx); }
+        Iterator& operator++() { ++row_idx; return *this; }
+        bool operator!=(const Iterator& other) const { return row_idx != other.row_idx; }
     private:
         const column_t* column;
         size_t row_idx;
     };
 
     Iterator begin() const { return Iterator(this, 0); }
-    Iterator end()   const { return Iterator(this, num_values); }
-
+    Iterator end() const { return Iterator(this, num_values); }
     size_t size() const { return num_values; }
 };
 
-// ============================================================================
-// ColumnBuffer
-// ============================================================================
 struct ColumnBuffer {
-
     std::vector<column_t> columns;
     size_t num_rows = 0;
     std::vector<DataType> types;
 
     ColumnBuffer() = default;
-
-    ColumnBuffer(size_t cols, size_t rows)
-        : columns(cols), num_rows(rows) {
-        for (auto& c : columns) {
-            c = column_t(1024);
-        }
+    ColumnBuffer(size_t cols, size_t rows) : columns(cols), num_rows(rows) {
+        for (auto &c : columns) c = column_t(1024);
     }
-
     size_t num_cols() const { return columns.size(); }
 };
-
 
 // Columnar operations
 ColumnBuffer scan_columnar_to_columnbuffer(const Plan& plan,

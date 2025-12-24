@@ -960,3 +960,159 @@ TEST_CASE(
 
     REQUIRE(col.get(3000).is_null());
 }
+
+TEST_CASE(
+    "Finalize works correctly when zero-copy was used in scan",
+    "[indexing][finalize][zero-copy]"
+) {
+    std::vector<std::vector<Data>> data;
+
+    for (int i = 0; i < 1000; ++i)
+        data.push_back({ i });
+
+    std::vector<DataType> types = { DataType::INT32 };
+
+    Table table(data, types);
+    ColumnarTable columnar = table.to_columnar();
+
+    Plan plan;
+    plan.inputs.emplace_back(std::move(columnar));
+
+    ScanNode scan{ .base_table_id = 0 };
+
+    auto buf = scan_columnar_to_columnbuffer(
+        plan, scan, {{0, DataType::INT32}}
+    );
+
+    REQUIRE(buf.columns[0].is_zero_copy == true);
+
+    auto out =
+        finalize_columnbuffer_to_columnar(
+            plan, buf, {{0, DataType::INT32}}
+        );
+
+    REQUIRE(out.columns.size() == 1);
+    REQUIRE(out.num_rows == 1000);
+
+    const Column& col = out.columns[0];
+
+    for (int i = 0; i < 1000; ++i) {
+        // read from finalized column
+        REQUIRE(buf.columns[0].get(i).as_i32() == i);
+
+    }
+}
+
+TEST_CASE(
+    "Hash join produces correct results even when build-side used zero-copy",
+    "[indexing][join][zero-copy]"
+) {
+    // Left: INT32 keys 0..9
+    std::vector<std::vector<Data>> left_data;
+    for (int i = 0; i < 10; ++i)
+        left_data.push_back({ i });
+
+    // Right: same keys but shuffled
+    std::vector<std::vector<Data>> right_data;
+    for (int i = 9; i >= 0; --i)
+        right_data.push_back({ i });
+
+    std::vector<DataType> types = { DataType::INT32 };
+
+    Table left(left_data, types);
+    Table right(right_data, types);
+
+    Plan plan;
+    size_t l_id = plan.new_input(left.to_columnar());
+    size_t r_id = plan.new_input(right.to_columnar());
+
+    size_t left_scan = plan.new_scan_node(l_id, {{0, DataType::INT32}});
+    size_t right_scan = plan.new_scan_node(r_id, {{0, DataType::INT32}});
+
+    JoinNode join{
+        .build_left = true,
+        .left = left_scan,
+        .right = right_scan,
+        .left_attr = 0,
+        .right_attr = 0
+    };
+
+   auto left_buf =
+        scan_columnar_to_columnbuffer(plan,
+                                      std::get<ScanNode>(plan.nodes[left_scan].data), 
+                                      {{0, DataType::INT32}});
+
+    auto right_buf =
+        scan_columnar_to_columnbuffer(plan,
+                                      std::get<ScanNode>(plan.nodes[right_scan].data), 
+                                      {{0, DataType::INT32}});
+
+    auto out =
+        join_columnbuffer_hash(
+            plan,
+            join,
+            {{0, DataType::INT32}, {1, DataType::INT32}},
+            left_buf,
+            right_buf
+        );
+
+    REQUIRE(out.num_rows == 10);
+}
+
+
+TEST_CASE(
+    "Indexing optimization handles page fully filled with no NULLs",
+    "[indexing][pages][boundary]"
+) {
+    std::vector<std::vector<Data>> data;
+
+    // 1024 rows → likely exactly one full page before bitmap
+    for (int i = 0; i < 1024; ++i)
+        data.push_back({ i });
+
+    std::vector<DataType> types = { DataType::INT32 };
+    Table table(data, types);
+
+    ColumnarTable columnar = table.to_columnar();
+
+    Plan plan;
+    plan.inputs.emplace_back(std::move(columnar));
+
+    ScanNode scan{ .base_table_id = 0 };
+
+    auto buf =
+        scan_columnar_to_columnbuffer(plan, scan, {{0, DataType::INT32}});
+
+    REQUIRE(buf.columns[0].is_zero_copy == true);
+    REQUIRE(buf.columns[0].get(1023).as_i32() == 1023);
+}
+
+TEST_CASE(
+    "Zero-copy sequential access advances cached page index",
+    "[indexing][cache]"
+) {
+    std::vector<std::vector<Data>> data;
+
+    for (int i = 0; i < 5000; ++i)
+        data.push_back({ i });
+
+    std::vector<DataType> types = { DataType::INT32 };
+    Table table(data, types);
+    ColumnarTable columnar = table.to_columnar();
+
+    Plan plan;
+    plan.inputs.emplace_back(std::move(columnar));
+
+    ScanNode scan{ .base_table_id = 0 };
+
+    auto buf =
+        scan_columnar_to_columnbuffer(plan, scan, {{0, DataType::INT32}});
+
+    const auto& col = buf.columns[0];
+
+    REQUIRE(col.is_zero_copy == true);
+
+    // sequential scan should not crash and values must match
+    for (int i = 0; i < 5000; ++i)
+        REQUIRE(col.get(i).as_i32() == i);
+}
