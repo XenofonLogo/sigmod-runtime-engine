@@ -2,6 +2,10 @@
 #include <hardware.h>
 #include <plan.h>
 #include <table.h>
+#include <atomic>
+#include <cstdlib>
+#include <cstdio>
+#include <thread>
 #include "columnar.h"
 #include "hashtable_interface.h" 
 
@@ -11,6 +15,134 @@
 //#include "cuckoo_wrapper.h"
 // #include "hopscotch_wrapper.h" 
 namespace Contest {
+
+namespace {
+struct QueryTelemetry {
+    uint64_t joins = 0;
+    uint64_t build_rows = 0;
+    uint64_t probe_rows = 0;
+    uint64_t out_rows = 0;
+    uint64_t out_cells = 0;
+    uint64_t bytes_strict_min = 0; // keys + output writes
+    uint64_t bytes_likely = 0;     // + output reads (value_t)
+};
+
+static inline bool join_telemetry_enabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("JOIN_TELEMETRY");
+        return v && *v && *v != '0';
+    }();
+    return enabled;
+}
+
+static inline bool auto_build_side_enabled() {
+    // Default: enabled. Set AUTO_BUILD_SIDE=0 to disable.
+    static const bool enabled = [] {
+        const char* v = std::getenv("AUTO_BUILD_SIDE");
+        if (!v) return true;
+        return *v && *v != '0';
+    }();
+    return enabled;
+}
+
+static inline bool join_global_bloom_enabled() {
+    // Default: disabled. Set JOIN_GLOBAL_BLOOM=1 to enable.
+    static const bool enabled = [] {
+        const char* v = std::getenv("JOIN_GLOBAL_BLOOM");
+        return v && *v && *v != '0';
+    }();
+    return enabled;
+}
+
+static inline uint32_t join_global_bloom_bits() {
+    // Default: 20 -> 1,048,576 bits (128 KiB).
+    // Clamp to a reasonable range so it doesn't blow up memory.
+    static const uint32_t bits = [] {
+        const char* v = std::getenv("JOIN_GLOBAL_BLOOM_BITS");
+        if (!v || !*v) return 20u;
+        const long parsed = std::strtol(v, nullptr, 10);
+        if (parsed < 16) return 16u;
+        if (parsed > 24) return 24u;
+        return static_cast<uint32_t>(parsed);
+    }();
+    return bits;
+}
+
+static std::atomic<uint64_t> g_query_seq{0};
+static thread_local QueryTelemetry g_qt;
+static thread_local uint64_t g_query_id = 0;
+
+static inline void qt_begin_query() {
+    g_query_id = ++g_query_seq;
+    g_qt = QueryTelemetry{};
+}
+
+static inline void qt_add_join(uint64_t build_rows,
+                               uint64_t probe_rows,
+                               uint64_t out_rows,
+                               uint64_t out_cols) {
+    g_qt.joins += 1;
+    g_qt.build_rows += build_rows;
+    g_qt.probe_rows += probe_rows;
+    g_qt.out_rows += out_rows;
+
+    const uint64_t out_cells = out_rows * out_cols;
+    g_qt.out_cells += out_cells;
+
+    const uint64_t bytes_keys = (build_rows + probe_rows) * 4ull;     // INT32 join keys
+    const uint64_t bytes_out_write = out_cells * 8ull;               // value_t writes (64-bit)
+    const uint64_t bytes_out_read = out_cells * 8ull;                // value_t reads (64-bit)
+
+    g_qt.bytes_strict_min += bytes_keys + bytes_out_write;
+    g_qt.bytes_likely += bytes_keys + bytes_out_read + bytes_out_write;
+}
+
+static inline void qt_end_query() {
+    const auto bytes_to_gib = [](uint64_t bytes) -> double {
+        return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
+    };
+    const auto ms_at_gbps = [](uint64_t bytes, double gb_per_s) -> double {
+        const double seconds = static_cast<double>(bytes) / (gb_per_s * 1e9);
+        return seconds * 1000.0;
+    };
+
+    // Bandwidth-only lower bounds (very optimistic for hash joins).
+    const double bw10 = 10.0;
+    const double bw20 = 20.0;
+    const double bw40 = 40.0;
+
+    std::fprintf(stderr,
+                 "[telemetry q%llu] joins=%llu build=%llu probe=%llu out=%llu out_cells=%llu\n",
+                 (unsigned long long)g_query_id,
+                 (unsigned long long)g_qt.joins,
+                 (unsigned long long)g_qt.build_rows,
+                 (unsigned long long)g_qt.probe_rows,
+                 (unsigned long long)g_qt.out_rows,
+                 (unsigned long long)g_qt.out_cells);
+
+    std::fprintf(stderr,
+                 "[telemetry q%llu] bytes_strict_min=%.3f GiB  bytes_likely=%.3f GiB\n",
+                 (unsigned long long)g_query_id,
+                 bytes_to_gib(g_qt.bytes_strict_min),
+                 bytes_to_gib(g_qt.bytes_likely));
+
+    std::fprintf(stderr,
+                 "[telemetry q%llu] BW LB strict: %.2f/%.2f/%.2f ms @ %.0f/%.0f/%.0f GB/s\n",
+                 (unsigned long long)g_query_id,
+                 ms_at_gbps(g_qt.bytes_strict_min, bw10),
+                 ms_at_gbps(g_qt.bytes_strict_min, bw20),
+                 ms_at_gbps(g_qt.bytes_strict_min, bw40),
+                 bw10, bw20, bw40);
+
+    std::fprintf(stderr,
+                 "[telemetry q%llu] BW LB likely: %.2f/%.2f/%.2f ms @ %.0f/%.0f/%.0f GB/s\n",
+                 (unsigned long long)g_query_id,
+                 ms_at_gbps(g_qt.bytes_likely, bw10),
+                 ms_at_gbps(g_qt.bytes_likely, bw20),
+                 ms_at_gbps(g_qt.bytes_likely, bw40),
+                 bw10, bw20, bw40);
+}
+} // namespace
 
 using ExecuteResult = ColumnBuffer;
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
@@ -27,64 +159,296 @@ struct JoinAlgorithm {
     void run_int32() {
         using Key = int32_t;
 
+        struct GlobalBloom {
+            uint32_t bits = 0;
+            uint64_t mask = 0;
+            std::vector<uint64_t> words;
+
+            void init(uint32_t bits_) {
+                bits = bits_;
+                mask = (bits_ == 64) ? ~0ull : ((1ull << bits_) - 1ull);
+                const size_t nbits = 1ull << bits_;
+                const size_t nwords = (nbits + 63ull) / 64ull;
+                words.assign(nwords, 0ull);
+            }
+
+            static inline uint64_t hash32(uint32_t x) {
+                // Fast multiplicative hash; good enough for bloom indexing.
+                return static_cast<uint64_t>(x) * 11400714819323198485ull;
+            }
+
+            inline void add_i32(int32_t key) {
+                const uint64_t h = hash32(static_cast<uint32_t>(key));
+                const uint64_t i1 = (h)&mask;
+                const uint64_t i2 = (h >> 32)&mask;
+                words[i1 >> 6] |= (1ull << (i1 & 63ull));
+                words[i2 >> 6] |= (1ull << (i2 & 63ull));
+            }
+
+            inline bool maybe_contains_i32(int32_t key) const {
+                const uint64_t h = hash32(static_cast<uint32_t>(key));
+                const uint64_t i1 = (h)&mask;
+                const uint64_t i2 = (h >> 32)&mask;
+                const uint64_t w1 = words[i1 >> 6];
+                const uint64_t w2 = words[i2 >> 6];
+                return (w1 & (1ull << (i1 & 63ull))) && (w2 & (1ull << (i2 & 63ull)));
+            }
+        };
+
         const ColumnBuffer* build_buf = build_left ? &left : &right;
         const ColumnBuffer* probe_buf = build_left ? &right : &left;
         size_t build_key_col = build_left ? left_col : right_col;
         size_t probe_key_col = build_left ? right_col : left_col;
 
-        // Build entries: (key, row_id)
-        std::vector<std::pair<Key, size_t>> entries;
+        auto table = create_hashtable<Key>();
+
+        const auto &build_col = build_buf->columns[build_key_col];
+        std::vector<HashEntry<Key>> entries;
         entries.reserve(build_buf->num_rows);
-        for (size_t i = 0; i < build_buf->num_rows; ++i) {
-            const auto& v = build_buf->columns[build_key_col].get(i);
-            if (!v.is_null())
-                entries.emplace_back(v.as_i32(), i);
+
+        if (build_col.is_zero_copy && build_col.src_column != nullptr && build_col.page_offsets.size() >= 2) {
+            // Zero-copy INT32 has no nulls; bulk extract without value_t materialization.
+            const auto &offs = build_col.page_offsets;
+            const size_t npages = offs.size() - 1;
+            for (size_t page_idx = 0; page_idx < npages; ++page_idx) {
+                const size_t base = offs[page_idx];
+                const size_t end = offs[page_idx + 1];
+                const size_t n = end - base;
+                auto *page = build_col.src_column->pages[page_idx]->data;
+                auto *data = reinterpret_cast<const int32_t *>(page + 4);
+                for (size_t slot = 0; slot < n; ++slot) {
+                    entries.push_back(HashEntry<Key>{static_cast<Key>(data[slot]), static_cast<uint32_t>(base + slot)});
+                }
+            }
+        } else {
+            for (size_t i = 0; i < build_buf->num_rows; ++i) {
+                const value_t &v = build_col.pages[i / build_col.values_per_page][i % build_col.values_per_page];
+                if (!v.is_null()) entries.push_back(HashEntry<Key>{v.as_i32(), static_cast<uint32_t>(i)});
+            }
         }
 
         if (entries.empty()) return;
 
-        // Build hash table
-        auto table = create_hashtable<Key>();
+        GlobalBloom bloom;
+        const bool use_global_bloom = join_global_bloom_enabled();
+        if (use_global_bloom) {
+            bloom.init(join_global_bloom_bits());
+            for (const auto &e : entries) bloom.add_i32(e.key);
+        }
+
         table->reserve(entries.size());
         table->build_from_entries(entries);
 
-        // Emit joined row
-        auto emit_pair = [&](size_t lidx, size_t ridx) {
-            size_t left_cols = left.num_cols();
-
-            for (size_t i = 0; i < output_attrs.size(); ++i) {
-                size_t src = std::get<0>(output_attrs[i]);
-                if (src < left_cols)
-                    results.columns[i].append(left.columns[src].get(lidx));
-                else
-                    results.columns[i].append(right.columns[src - left_cols].get(ridx));
-            }
-            results.num_rows++;
+        struct OutPair {
+            uint32_t lidx;
+            uint32_t ridx;
         };
 
-        // Probe
-        for (size_t j = 0; j < probe_buf->num_rows; ++j) {
-            const auto& v = probe_buf->columns[probe_key_col].get(j);
-            if (v.is_null()) continue;
+        const size_t probe_n = probe_buf->num_rows;
+        size_t hw = std::thread::hardware_concurrency();
+        if (!hw) hw = 4;
 
-            Key probe_key = v.as_i32();
+        // Parallelize only when it pays off.
+        const size_t nthreads = (probe_n >= (1u << 19)) ? hw : 1;
+        std::vector<std::vector<OutPair>> out_by_thread(nthreads);
 
-            size_t len = 0;
-            // Use the interface method (table->probe)
-            const auto* bucket = table->probe(probe_key, len);
-            if (!bucket || len == 0) continue;
+        auto probe_range = [&](size_t tid, size_t begin_j, size_t end_j) {
+            auto &local = out_by_thread[tid];
+            local.reserve((end_j - begin_j) / 16 + 256);
 
-            for (size_t k = 0; k < len; ++k) {
-                
-                if (bucket[k].key != probe_key) continue;
-                size_t build_row = bucket[k].row_id;
+            const auto &probe_col = probe_buf->columns[probe_key_col];
 
-                if (build_left)
-                    emit_pair(build_row, j);
-                else
-                    emit_pair(j, build_row);
+            if (probe_col.is_zero_copy && probe_col.src_column != nullptr && probe_col.page_offsets.size() >= 2) {
+                // Probe range is contiguous; keep a per-thread page cursor to avoid binary search.
+                const auto &offs = probe_col.page_offsets;
+                size_t page_idx = 0;
+                if (begin_j >= offs[1]) {
+                    size_t left = 0, right = offs.size() - 1;
+                    while (left < right - 1) {
+                        size_t mid = (left + right) / 2;
+                        if (begin_j < offs[mid]) right = mid;
+                        else left = mid;
+                    }
+                    page_idx = left;
+                }
+
+                size_t base = offs[page_idx];
+                size_t next = offs[page_idx + 1];
+                auto *page = probe_col.src_column->pages[page_idx]->data;
+                auto *data = reinterpret_cast<const int32_t *>(page + 4);
+
+                for (size_t j = begin_j; j < end_j; ++j) {
+                    while (j >= next) {
+                        ++page_idx;
+                        base = offs[page_idx];
+                        next = offs[page_idx + 1];
+                        page = probe_col.src_column->pages[page_idx]->data;
+                        data = reinterpret_cast<const int32_t *>(page + 4);
+                    }
+
+                    const int32_t probe_key = data[j - base];
+
+                    if (use_global_bloom && !bloom.maybe_contains_i32(probe_key)) continue;
+
+                    size_t len = 0;
+                    const auto *bucket = table->probe(probe_key, len);
+                    if (!bucket || len == 0) continue;
+
+                    for (size_t k = 0; k < len; ++k) {
+                        if (bucket[k].key != probe_key) continue;
+                        const uint32_t build_row = bucket[k].row_id;
+                        if (build_left)
+                            local.push_back(OutPair{build_row, static_cast<uint32_t>(j)});
+                        else
+                            local.push_back(OutPair{static_cast<uint32_t>(j), build_row});
+                    }
+                }
+
+                return;
             }
+
+            for (size_t j = begin_j; j < end_j; ++j) {
+                const value_t &v = probe_col.pages[j / probe_col.values_per_page][j % probe_col.values_per_page];
+                if (v.is_null()) continue;
+                const int32_t probe_key = v.as_i32();
+
+                if (use_global_bloom && !bloom.maybe_contains_i32(probe_key)) continue;
+
+                size_t len = 0;
+                const auto *bucket = table->probe(probe_key, len);
+                if (!bucket || len == 0) continue;
+
+                for (size_t k = 0; k < len; ++k) {
+                    if (bucket[k].key != probe_key) continue;
+                    const uint32_t build_row = bucket[k].row_id;
+                    if (build_left)
+                        local.push_back(OutPair{build_row, static_cast<uint32_t>(j)});
+                    else
+                        local.push_back(OutPair{static_cast<uint32_t>(j), build_row});
+                }
+            }
+        };
+
+        if (nthreads == 1) {
+            probe_range(0, 0, probe_n);
+        } else {
+            std::vector<std::thread> threads;
+            threads.reserve(nthreads);
+            const size_t block = (probe_n + nthreads - 1) / nthreads;
+            for (size_t t = 0; t < nthreads; ++t) {
+                const size_t begin_j = t * block;
+                const size_t end_j = std::min(probe_n, begin_j + block);
+                if (begin_j >= end_j) break;
+                threads.emplace_back(probe_range, t, begin_j, end_j);
+            }
+            for (auto &th : threads) th.join();
         }
+
+        size_t total_out = 0;
+        for (auto &v : out_by_thread) total_out += v.size();
+        if (total_out == 0) return;
+
+        // Allocate output columns once, then fill.
+        const size_t num_output_cols = output_attrs.size();
+
+        if (join_telemetry_enabled()) {
+            qt_add_join(static_cast<uint64_t>(entries.size()),
+                        static_cast<uint64_t>(probe_n),
+                        static_cast<uint64_t>(total_out),
+                        static_cast<uint64_t>(num_output_cols));
+        }
+
+        struct OutputMap {
+            bool from_left;
+            uint32_t idx;
+        };
+        std::vector<OutputMap> out_map;
+        out_map.reserve(num_output_cols);
+
+        for (size_t col = 0; col < num_output_cols; ++col) {
+            auto &dst = results.columns[col];
+            dst.pages.clear();
+            dst.page_offsets.clear();
+            dst.src_column = nullptr;
+            dst.is_zero_copy = false;
+            dst.cached_page_idx = 0;
+            dst.num_values = total_out;
+
+            const size_t page_sz = dst.values_per_page;
+            size_t written = 0;
+            while (written < total_out) {
+                const size_t take = std::min(page_sz, total_out - written);
+                dst.pages.emplace_back(take);
+                written += take;
+            }
+
+            const size_t left_cols = left.num_cols();
+            const size_t src = std::get<0>(output_attrs[col]);
+            if (src < left_cols)
+                out_map.push_back(OutputMap{true, static_cast<uint32_t>(src)});
+            else
+                out_map.push_back(OutputMap{false, static_cast<uint32_t>(src - left_cols)});
+        }
+
+        // All columns use the same page size (ColumnBuffer constructs them with 1024).
+        const size_t out_page_sz = results.columns.empty() ? 1024 : results.columns[0].values_per_page;
+        // For very large outputs, materialization can dominate; do it in parallel.
+        const bool parallel_materialize = (nthreads > 1) && (total_out >= (1u << 22));
+
+        if (!parallel_materialize) {
+            size_t out_idx = 0;
+            for (size_t t = 0; t < nthreads; ++t) {
+                for (const auto &op : out_by_thread[t]) {
+                    const size_t lidx = op.lidx;
+                    const size_t ridx = op.ridx;
+
+                    const size_t page_idx = out_idx / out_page_sz;
+                    const size_t off = out_idx % out_page_sz;
+
+                    for (size_t col = 0; col < num_output_cols; ++col) {
+                        const auto m = out_map[col];
+                        if (m.from_left)
+                            results.columns[col].pages[page_idx][off] = left.columns[m.idx].get(lidx);
+                        else
+                            results.columns[col].pages[page_idx][off] = right.columns[m.idx].get(ridx);
+                    }
+                    ++out_idx;
+                }
+            }
+        } else {
+            std::vector<size_t> base(nthreads + 1, 0);
+            for (size_t t = 0; t < nthreads; ++t) base[t + 1] = base[t] + out_by_thread[t].size();
+
+            std::vector<std::thread> threads;
+            threads.reserve(nthreads);
+            for (size_t t = 0; t < nthreads; ++t) {
+                threads.emplace_back([&, t]() {
+                    const size_t start = base[t];
+                    size_t out_idx = start;
+                    std::vector<size_t> caches(num_output_cols, 0);
+
+                    for (const auto &op : out_by_thread[t]) {
+                        const size_t lidx = op.lidx;
+                        const size_t ridx = op.ridx;
+
+                        const size_t page_idx = out_idx / out_page_sz;
+                        const size_t off = out_idx % out_page_sz;
+
+                        for (size_t col = 0; col < num_output_cols; ++col) {
+                            const auto m = out_map[col];
+                            if (m.from_left)
+                                results.columns[col].pages[page_idx][off] = left.columns[m.idx].get_cached(lidx, caches[col]);
+                            else
+                                results.columns[col].pages[page_idx][off] = right.columns[m.idx].get_cached(ridx, caches[col]);
+                        }
+                        ++out_idx;
+                    }
+                });
+            }
+            for (auto &th : threads) th.join();
+        }
+
+        results.num_rows = total_out;
     }
 };
 
@@ -102,6 +466,16 @@ ExecuteResult execute_hash_join(const Plan&                plan,
     auto left  = execute_impl(plan, left_idx);
     auto right = execute_impl(plan, right_idx);
 
+    // Optimizer-ish: prefer building the hash table on the smaller side.
+    // Only override the plan hint when there is a clear size win.
+    bool effective_build_left = join.build_left;
+    if (auto_build_side_enabled()) {
+        const size_t l = left.num_rows;
+        const size_t r = right.num_rows;
+        if (l * 10ull <= r * 9ull) effective_build_left = true;
+        else if (r * 10ull <= l * 9ull) effective_build_left = false;
+    }
+
     // prepare output ColumnBuffer
     ColumnBuffer results(output_attrs.size(), 0);
     results.types.reserve(output_attrs.size());
@@ -109,7 +483,7 @@ ExecuteResult execute_hash_join(const Plan&                plan,
         results.types.push_back(std::get<1>(t));
 
     JoinAlgorithm ja {
-        .build_left   = join.build_left,
+        .build_left   = effective_build_left,
         .left         = left,
         .right        = right,
         .results      = results,
@@ -119,7 +493,7 @@ ExecuteResult execute_hash_join(const Plan&                plan,
     };
 
     // enforce INT32 join key
-    if (join.build_left) {
+    if (effective_build_left) {
         if (std::get<1>(left_node.output_attrs[join.left_attr]) != DataType::INT32)
             throw std::runtime_error("Only INT32 join columns supported.");
     } else {
@@ -156,7 +530,10 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 }
 
 ColumnarTable execute(const Plan& plan, void* context) {
+    (void)context;
+    if (join_telemetry_enabled()) qt_begin_query();
     auto buf = execute_impl(plan, plan.root);
+    if (join_telemetry_enabled()) qt_end_query();
     return finalize_columnbuffer_to_columnar(
         plan, buf, plan.nodes[plan.root].output_attrs
     );

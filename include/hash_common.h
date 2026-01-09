@@ -11,7 +11,7 @@ namespace Contest {
 template <typename Key>
 struct HashEntry {
     Key key;
-    size_t row_id; // The row ID from the build side
+    uint32_t row_id; // The row ID from the build side (fits all contest tables)
 };
 
 // This holds the information stored in the hash table array slots.

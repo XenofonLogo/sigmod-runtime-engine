@@ -118,7 +118,7 @@ public:
         index_infos_to_insert.reserve(grouped_entries.size());
 
         for (const auto& pair : grouped_entries) {
-            const Key& key = pair.first;
+            std::map<Key, std::vector<size_t>> grouped_entries; // Updated to accept HashEntry vectors
             const std::vector<size_t>& row_ids = pair.second;
 
             IndexInfo info;

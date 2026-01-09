@@ -95,6 +95,43 @@ struct column_t {
         return pages[page_idx][offset_in_page];
     }
 
+    // Thread-safe accessor that does not touch shared mutable state.
+    // Returns by value so callers don't depend on per-thread temporaries.
+    value_t get_cached(size_t row_idx, size_t& page_cache) const {
+        if (is_zero_copy && src_column != nullptr) {
+            size_t page_idx = page_cache;
+            if (page_idx >= page_offsets.size() - 1) page_idx = 0;
+
+            // Fast-path: cache hit.
+            if (row_idx >= page_offsets[page_idx] && row_idx < page_offsets[page_idx + 1]) {
+                // ok
+            }
+            // Check next page (helps for mildly clustered access).
+            else if (page_idx + 1 < page_offsets.size() - 1 && row_idx >= page_offsets[page_idx + 1] &&
+                     row_idx < page_offsets[page_idx + 2]) {
+                ++page_idx;
+            } else {
+                size_t left = 0, right = page_offsets.size() - 1;
+                while (left < right - 1) {
+                    size_t mid = (left + right) / 2;
+                    if (row_idx < page_offsets[mid]) right = mid;
+                    else left = mid;
+                }
+                page_idx = left;
+            }
+
+            page_cache = page_idx;
+            const size_t slot = row_idx - page_offsets[page_idx];
+            auto* page = src_column->pages[page_idx]->data;
+            auto* data = reinterpret_cast<const int32_t*>(page + 4);
+            return value_t::make_i32(data[slot]);
+        }
+
+        const size_t page_idx = row_idx / values_per_page;
+        const size_t offset_in_page = row_idx % values_per_page;
+        return pages[page_idx][offset_in_page];
+    }
+
     class Iterator {
     public:
         Iterator(const column_t* col, size_t idx) : column(col), row_idx(idx) {}

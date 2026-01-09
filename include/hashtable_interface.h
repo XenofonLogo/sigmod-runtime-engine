@@ -19,8 +19,8 @@ public:
     // Reserves space for the expected number of entries.
     virtual void reserve(size_t capacity) = 0;
 
-    // Builds the hash table from a vector of (key, row_id) pairs.
-    virtual void build_from_entries(const std::vector<std::pair<Key, size_t>>& entries) = 0;
+    // Builds the hash table from a vector of (key, row_id) entries.
+    virtual void build_from_entries(const std::vector<HashEntry<Key>>& entries) = 0;
 
     // Probes the hash table for a key.
     // len is set to the number of entries found for the key.

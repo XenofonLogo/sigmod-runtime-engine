@@ -41,12 +41,12 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
         const ColumnBuffer& build_buf = build_left_side ? left : right;
         size_t build_key_idx = build_left_side ? join.left_attr : join.right_attr;
 
-        std::vector<std::pair<T, std::size_t>> entries;
+        std::vector<HashEntry<T>> entries;
         entries.reserve(build_buf.num_rows);
         for (std::size_t i = 0; i < build_buf.num_rows; ++i) {
             const auto& v = build_buf.columns[build_key_idx].get(i);
             if (v.is_null()) continue;
-            entries.emplace_back(v.as_i32(), i);
+            entries.push_back(HashEntry<T>{v.as_i32(), static_cast<uint32_t>(i)});
         }
 
         UnchainedHashTable<T> ht;
@@ -67,8 +67,8 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
 
             for (std::size_t k = 0; k < len; ++k) {
                 if (base[k].key == probe_key) {
-                    if (build_left_side) emit_pair(base[k].row_id, j);
-                    else emit_pair(j, base[k].row_id);
+                    if (build_left_side) emit_pair(static_cast<size_t>(base[k].row_id), j);
+                    else emit_pair(j, static_cast<size_t>(base[k].row_id));
                 }
             }
         }
@@ -82,13 +82,13 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
         const ColumnBuffer& build_buf = build_left_side ? left : right;
         size_t build_key_idx = build_left_side ? join.left_attr : join.right_attr;
 
-        std::vector<std::pair<uint64_t, std::size_t>> entries;
+        std::vector<HashEntry<uint64_t>> entries;
         entries.reserve(build_buf.num_rows);
 
         for (std::size_t i = 0; i < build_buf.num_rows; ++i) {
             const auto& v = build_buf.columns[build_key_idx].get(i);
             if (v.is_null()) continue;
-            entries.emplace_back(v.as_ref(), i);
+            entries.push_back(HashEntry<uint64_t>{v.as_ref(), static_cast<uint32_t>(i)});
         }
 
         UnchainedHashTable<uint64_t> ht;
@@ -109,8 +109,8 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
 
             for (std::size_t k = 0; k < len; ++k) {
                 if (base[k].key == key) {
-                    if (build_left_side) emit_pair(base[k].row_id, j);
-                    else emit_pair(j, base[k].row_id);
+                    if (build_left_side) emit_pair(static_cast<size_t>(base[k].row_id), j);
+                    else emit_pair(j, static_cast<size_t>(base[k].row_id));
                 }
             }
         }

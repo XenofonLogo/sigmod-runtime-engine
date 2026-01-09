@@ -21,9 +21,11 @@ public:
         // Ignored, as Hopscotch manages capacity internally during build
     }
 
-    void build_from_entries(const std::vector<std::pair<Key, size_t>>& entries) override {
-        // Delegate directly to the HopscotchBackend's build method
-        backend_.build_from_entries(entries);
+    void build_from_entries(const std::vector<HashEntry<Key>>& entries) override {
+        std::vector<std::pair<Key, size_t>> pairs;
+        pairs.reserve(entries.size());
+        for (const auto &e : entries) pairs.emplace_back(e.key, static_cast<size_t>(e.row_id));
+        backend_.build_from_entries(pairs);
     }
 
     const HashEntry<Key>* probe(const Key& key, size_t& len) const override {

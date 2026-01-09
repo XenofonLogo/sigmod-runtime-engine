@@ -75,15 +75,31 @@ public:
      * Πάντα στρογγυλοποιεί σε δύναμη του 2 όπως απαιτεί το paper.
      */
     void reserve(std::size_t tuples_capacity) {
-        std::size_t desired = 1;
-        while (desired < tuples_capacity && desired < (1ull << 30)) desired <<= 1;
+        tuples_.reserve(tuples_capacity);
 
-        if (desired > dir_size_) {
+        // Performance-oriented directory sizing:
+        // keep the directory power-of-two, but cap it to avoid massive memory and slow clears.
+        // Target average bucket length around ~8.
+        constexpr std::size_t kMinDirSize = 1ull << 10; // 1024
+        constexpr std::size_t kMaxDirSize = 1ull << 18; // 262,144
+        constexpr std::size_t kTargetBucket = 8;
+
+        auto next_pow2 = [](std::size_t v) {
+            std::size_t p = 1;
+            while (p < v) p <<= 1;
+            return p;
+        };
+
+        std::size_t desired = tuples_capacity / kTargetBucket;
+        if (desired < kMinDirSize) desired = kMinDirSize;
+        desired = next_pow2(desired);
+        if (desired > kMaxDirSize) desired = kMaxDirSize;
+
+        if (desired != dir_size_) {
             dir_size_ = desired;
             dir_mask_ = dir_size_ - 1;
             directory_.assign(dir_size_, {0,0,0});
         }
-        tuples_.reserve(tuples_capacity);
     }
 
     /*
@@ -104,6 +120,9 @@ public:
             tuples_.clear();
             return;
         }
+
+        // Reset bloom bits every build (begin/end will be overwritten below).
+        for (auto &d : directory_) d.bloom = 0;
 
         // Υπολογισμός hash values
         std::vector<uint64_t> hashes;
