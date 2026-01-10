@@ -22,6 +22,8 @@ public:
     }
 
     void build_from_entries(const std::vector<HashEntry<Key>>& entries) override {
+        // (GR) Adapter layer: το backend εδώ περιμένει std::pair<Key,size_t>.
+        // Η μετατροπή έχει overhead, αλλά δεν είναι το default fastest path (unchained) στο xenofon1.
         std::vector<std::pair<Key, size_t>> pairs;
         pairs.reserve(entries.size());
         for (const auto &e : entries) pairs.emplace_back(e.key, static_cast<size_t>(e.row_id));

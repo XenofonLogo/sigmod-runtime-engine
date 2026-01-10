@@ -12,6 +12,7 @@ template <typename Key>
 struct HashEntry {
     Key key;
     uint32_t row_id; // The row ID from the build side (fits all contest tables)
+    // (GR) Το row_id χωράει σε uint32_t για όλα τα contest datasets -> λιγότερη μνήμη/traffic σε buckets.
 };
 
 // This holds the information stored in the hash table array slots.

@@ -22,6 +22,8 @@ public:
     }
 
     void build_from_entries(const std::vector<HashEntry<Key>>& entries) override {
+        // (GR) Adapter layer: μετατροπή HashEntry -> pair για legacy backend.
+        // Κρατάμε το interface ενιαίο ώστε ο executor να είναι βελτιστοποιημένος.
         std::vector<std::pair<Key, size_t>> pairs;
         pairs.reserve(entries.size());
         for (const auto &e : entries) pairs.emplace_back(e.key, static_cast<size_t>(e.row_id));

@@ -35,6 +35,8 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
     };
 
     // Numeric join (INT32 only)
+    // (GR) Αντικατάσταση std::unordered_map (πολλά μικρά allocations + pointer chasing)
+    // με UnchainedHashTable (flat storage + prefix sums), που είναι πολύ πιο cache-friendly.
     auto join_numeric = [&](bool build_left_side) {
         using T = int32_t;
 
@@ -78,6 +80,8 @@ ColumnBuffer join_columnbuffer_hash(const Plan& plan,
         // We'll hash on the packed 64-bit reference (raw). This mirrors
         // the scan which produces PackedStringRef values and keeps
         // materialization for the end.
+        // (GR) Έτσι αποφεύγουμε κόστος string compare/copies κατά το join.
+        // Το πραγματικό string γίνεται resolve μόνο στο τελικό materialization.
 
         const ColumnBuffer& build_buf = build_left_side ? left : right;
         size_t build_key_idx = build_left_side ? join.left_attr : join.right_attr;

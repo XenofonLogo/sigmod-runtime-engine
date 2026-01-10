@@ -28,6 +28,8 @@ struct QueryTelemetry {
 };
 
 static inline bool join_telemetry_enabled() {
+    // (GR) Προαιρετικά stats για να δούμε αν είμαστε memory-bandwidth bound.
+    // Ενεργοποίηση: JOIN_TELEMETRY=1
     static const bool enabled = [] {
         const char* v = std::getenv("JOIN_TELEMETRY");
         return v && *v && *v != '0';
@@ -37,6 +39,7 @@ static inline bool join_telemetry_enabled() {
 
 static inline bool auto_build_side_enabled() {
     // Default: enabled. Set AUTO_BUILD_SIDE=0 to disable.
+    // (GR) Αυτόματο "optimizer-ish" heuristic: χτίζουμε hash table στη μικρότερη πλευρά.
     static const bool enabled = [] {
         const char* v = std::getenv("AUTO_BUILD_SIDE");
         if (!v) return true;
@@ -47,6 +50,8 @@ static inline bool auto_build_side_enabled() {
 
 static inline bool join_global_bloom_enabled() {
     // Default: disabled. Set JOIN_GLOBAL_BLOOM=1 to enable.
+    // (GR) Προαιρετικό global bloom πριν το probe: μειώνει probes σε άσχετα keys.
+    // Χρήσιμο όταν probe πλευρά είναι τεράστια και το selectivity είναι μικρό.
     static const bool enabled = [] {
         const char* v = std::getenv("JOIN_GLOBAL_BLOOM");
         return v && *v && *v != '0';
@@ -57,6 +62,7 @@ static inline bool join_global_bloom_enabled() {
 static inline uint32_t join_global_bloom_bits() {
     // Default: 20 -> 1,048,576 bits (128 KiB).
     // Clamp to a reasonable range so it doesn't blow up memory.
+    // (GR) Περισσότερα bits -> λιγότερα false positives αλλά περισσότερη μνήμη.
     static const uint32_t bits = [] {
         const char* v = std::getenv("JOIN_GLOBAL_BLOOM_BITS");
         if (!v || !*v) return 20u;
@@ -174,6 +180,7 @@ struct JoinAlgorithm {
 
             static inline uint64_t hash32(uint32_t x) {
                 // Fast multiplicative hash; good enough for bloom indexing.
+                // (GR) Ο bloom δεν χρειάζεται κρυπτογραφική ποιότητα, μόνο γρήγορο mixing.
                 return static_cast<uint64_t>(x) * 11400714819323198485ull;
             }
 
@@ -207,7 +214,8 @@ struct JoinAlgorithm {
         entries.reserve(build_buf->num_rows);
 
         if (build_col.is_zero_copy && build_col.src_column != nullptr && build_col.page_offsets.size() >= 2) {
-            // Zero-copy INT32 has no nulls; bulk extract without value_t materialization.
+            // (GR) Zero-copy INT32: χωρίς NULLs, άρα μπορούμε να κάνουμε bulk extract keys
+            // απευθείας από τις pages χωρίς value_t materialization.
             const auto &offs = build_col.page_offsets;
             const size_t npages = offs.size() - 1;
             for (size_t page_idx = 0; page_idx < npages; ++page_idx) {
@@ -249,6 +257,7 @@ struct JoinAlgorithm {
         if (!hw) hw = 4;
 
         // Parallelize only when it pays off.
+        // (GR) Για μικρά inputs το overhead των threads είναι μεγαλύτερο από το κέρδος.
         const size_t nthreads = (probe_n >= (1u << 19)) ? hw : 1;
         std::vector<std::vector<OutPair>> out_by_thread(nthreads);
 
@@ -259,7 +268,8 @@ struct JoinAlgorithm {
             const auto &probe_col = probe_buf->columns[probe_key_col];
 
             if (probe_col.is_zero_copy && probe_col.src_column != nullptr && probe_col.page_offsets.size() >= 2) {
-                // Probe range is contiguous; keep a per-thread page cursor to avoid binary search.
+                // (GR) Probe range είναι συνεχές (contiguous) -> κρατάμε per-thread page cursor,
+                // ώστε να αποφεύγουμε binary search στο page_offsets για κάθε row.
                 const auto &offs = probe_col.page_offsets;
                 size_t page_idx = 0;
                 if (begin_j >= offs[1]) {
@@ -349,6 +359,8 @@ struct JoinAlgorithm {
         if (total_out == 0) return;
 
         // Allocate output columns once, then fill.
+        // (GR) Το output materialization είναι συχνά bottleneck. Προ-δεσμεύουμε ακριβώς όση μνήμη χρειάζεται
+        // (total_out rows) και γράφουμε με άμεσο indexing αντί για append() σε value_t.
         const size_t num_output_cols = output_attrs.size();
 
         if (join_telemetry_enabled()) {
@@ -393,6 +405,7 @@ struct JoinAlgorithm {
         // All columns use the same page size (ColumnBuffer constructs them with 1024).
         const size_t out_page_sz = results.columns.empty() ? 1024 : results.columns[0].values_per_page;
         // For very large outputs, materialization can dominate; do it in parallel.
+        // (GR) Όταν το αποτέλεσμα είναι τεράστιο, το copy των value_t κυριαρχεί -> parallel fill.
         const bool parallel_materialize = (nthreads > 1) && (total_out >= (1u << 22));
 
         if (!parallel_materialize) {

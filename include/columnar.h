@@ -9,6 +9,7 @@
 namespace Contest {
 
 // Helper function to read bitmap
+// (GR) Το bitmap έχει 1=valid, 0=null. Το κρατάμε inline στο header για speed.
 static inline bool get_bitmap_local_col(const uint8_t* bitmap, uint16_t idx) {
     auto byte_idx = idx / 8;
     auto bit = idx % 8;
@@ -16,10 +17,13 @@ static inline bool get_bitmap_local_col(const uint8_t* bitmap, uint16_t idx) {
 }
 
 // Column store with smart zero-copy
+// (GR) Στόχος: να αποφύγουμε materialization σε value_t για INT32 χωρίς NULLs.
+// Αυτό μειώνει allocations/reads και επιταχύνει πολύ τα joins/scan όταν τα keys είναι πυκνά.
 struct column_t {
     std::vector<std::vector<value_t>> pages;
 
     // Zero-copy mode for INT32 without nulls
+    // (GR) Αν ισχύει, τα INT32 διαβάζονται απευθείας από τις Columnar pages (page+4) χωρίς bitmap check.
     const Column* src_column = nullptr;
     std::vector<size_t> page_offsets;  // Cumulative row counts per page
     bool is_zero_copy = false;
@@ -28,6 +32,8 @@ struct column_t {
     size_t num_values = 0;
 
     // CACHE for sequential access optimization
+    // (GR) Η πρόσβαση σε join output είναι συχνά σχεδόν σειριακή -> κρατάμε cached page index
+    // για να αποφεύγουμε binary search στα page_offsets.
     mutable size_t cached_page_idx = 0;
 
     column_t() = default;
@@ -44,6 +50,7 @@ struct column_t {
 
     const value_t& get(size_t row_idx) const {
         // ZERO-COPY PATH with cached page lookup
+        // (GR) Κόβουμε το κόστος του value_t materialization + bitmap, άρα λιγότερη πίεση σε cache/CPU.
         if (is_zero_copy && src_column != nullptr) {
             static thread_local value_t tmp;
             
@@ -82,6 +89,7 @@ struct column_t {
             size_t slot = row_idx - page_offsets[page_idx];
             
             // Read directly from the source page
+            // (GR) Format INT32 page: header (2 bytes rows + padding) και μετά data από offset +4.
             auto* page = src_column->pages[page_idx]->data;
             auto* data = reinterpret_cast<const int32_t*>(page + 4);
             
@@ -97,6 +105,7 @@ struct column_t {
 
     // Thread-safe accessor that does not touch shared mutable state.
     // Returns by value so callers don't depend on per-thread temporaries.
+    // (GR) Χρησιμοποιείται σε parallel materialization: κάθε thread κρατάει δικό του page_cache.
     value_t get_cached(size_t row_idx, size_t& page_cache) const {
         if (is_zero_copy && src_column != nullptr) {
             size_t page_idx = page_cache;

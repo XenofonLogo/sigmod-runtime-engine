@@ -68,6 +68,10 @@ struct value_t {
 
     static value_t make_i32(int32_t v) { value_t x; x.raw = static_cast<uint64_t>(static_cast<int64_t>(v)); return x; }
 
+    // (GR) Σε αυτό το branch κρατάμε μόνο INT32 + packed string refs.
+    // Αφαιρέθηκαν make_i64/make_f64 για να μειωθεί το API surface/branches και να επιταχυνθεί η hot-path.
+    // Αν χρειαστούν ξανά άλλα types, μπορούν να επανέλθουν, αλλά αυτό συνήθως κοστίζει σε απλότητα/ταχύτητα.
+
     // Explicit Late Materialization factory (pack a full 64-bit string reference)
     static value_t make_str_ref(uint8_t t, uint8_t c, uint32_t p, uint16_t s) {
         value_t x; x.raw = PackedStringRef(t,c,p,s).raw; return x;
