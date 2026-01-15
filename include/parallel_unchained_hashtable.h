@@ -5,10 +5,16 @@
 #include <type_traits>
 #include <stdexcept>
 #include <algorithm>
+#include <thread>
+#include <atomic>
+#include <cstdlib>
+#include <memory>
 #include "plan.h"
 #include "hash_common.h"
 #include "hash_functions.h"
 #include "bloom_filter.h"
+#include "slab_allocator.h"
+#include "three_level_slab.h"
 
 /*
  * TupleEntry:
@@ -54,6 +60,7 @@ template<typename Key, typename Hasher = Hash::Hasher32>
 class FlatUnchainedHashTable {
 public:
     using entry_type = TupleEntry<Key>;
+    using entry_allocator = Contest::SlabAllocator<entry_type>;
 
     explicit FlatUnchainedHashTable(Hasher hasher = Hasher(), std::size_t directory_power = 10)
         : hasher_(hasher)
@@ -122,6 +129,12 @@ public:
      * 5. Bloom: Ενημέρωση bloom filters
      */
     void build_from_entries(const std::vector<Contest::HashEntry<Key>>& entries) {
+        if (required_partition_build_enabled() &&
+            entries.size() >= required_partition_build_min_rows()) {
+            build_from_entries_partitioned_parallel(entries);
+            return;
+        }
+        const bool exp_parallel = experimental_parallel_build_enabled();
         if (entries.empty()) {
             std::fill(directory_offsets_.begin(), directory_offsets_.end(), 0);
             std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
@@ -133,8 +146,13 @@ public:
         std::fill(directory_offsets_.begin(), directory_offsets_.end(), 0);
         std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
 
+        if (exp_parallel) {
+            build_from_entries_parallel(entries);
+            return;
+        }
+
         // ===============================================================
-        // PHASE 2: COUNT - Μέτρηση tuples ανά directory slot
+        // PHASE 1: COUNT - Μέτρηση tuples ανά directory slot
         // (Figure 2, lines 4-8)
         // ===============================================================
         if (counts_.size() != dir_size_) counts_.assign(dir_size_, 0);
@@ -152,7 +170,7 @@ public:
         }
 
         // ===============================================================
-        // PHASE 3: PREFIX SUM - Υπολογισμός offsets
+        // PHASE 2: PREFIX SUM - Υπολογισμός offsets
         // (Figure 2, lines 10-18)
         // ===============================================================
         
@@ -167,12 +185,12 @@ public:
         directory_offsets_[dir_size_] = cumulative;
 
         // ===============================================================
-        // PHASE 4: ALLOCATE - Δέσμευση μνήμης για tuples
+        // PHASE 3: ALLOCATE - Δέσμευση μνήμης για tuples
         // ===============================================================
         tuples_.assign(cumulative, entry_type{});
 
         // ===============================================================
-        // PHASE 5: COPY - Αντιγραφή tuples στη σωστή θέση
+        // PHASE 4: COPY - Αντιγραφή tuples στη σωστή θέση
         // (Figure 2, lines 19-24)
         // ===============================================================
         
@@ -201,6 +219,11 @@ public:
     void build_from_zero_copy_int32(const Column* src_column,
                                     const std::vector<std::size_t>& page_offsets,
                                     std::size_t num_rows) {
+        if (required_partition_build_enabled() &&
+            num_rows >= required_partition_build_min_rows()) {
+            build_from_zero_copy_int32_partitioned_parallel(src_column, page_offsets, num_rows);
+            return;
+        }
         if (num_rows == 0 || src_column == nullptr || page_offsets.size() < 2) {
             std::fill(directory_offsets_.begin(), directory_offsets_.end(), 0);
             std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
@@ -302,6 +325,394 @@ public:
         return &tuples_[begin];
     }
 
+    // Experimental parallel build (disabled by default). Enabled via EXP_PARALLEL_BUILD=1
+    // Uses parallel count + atomic write pointers. Typically slower, kept for comparison.
+    void build_from_entries_parallel(const std::vector<Contest::HashEntry<Key>>& entries) {
+        const size_t n = entries.size();
+        if (n == 0) {
+            tuples_.clear();
+            std::fill(directory_offsets_.begin(), directory_offsets_.end(), 0);
+            std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
+            return;
+        }
+
+        const size_t hw = std::max<size_t>(2, std::thread::hardware_concurrency());
+        const size_t nthreads = hw;
+
+        // 1) Parallel count + bloom
+        if (counts_.size() != dir_size_) counts_.assign(dir_size_, 0);
+        else std::fill(counts_.begin(), counts_.end(), 0);
+        std::vector<std::vector<uint32_t>> local_counts(nthreads, std::vector<uint32_t>(dir_size_, 0));
+        std::vector<std::vector<uint16_t>> local_bloom(nthreads, std::vector<uint16_t>(dir_size_, 0));
+
+        const size_t block = (n + nthreads - 1) / nthreads;
+        std::vector<std::thread> threads;
+        threads.reserve(nthreads);
+
+        for (size_t t = 0; t < nthreads; ++t) {
+            const size_t begin = t * block;
+            const size_t end = std::min(n, begin + block);
+            if (begin >= end) break;
+            threads.emplace_back([&, begin, end, t]() {
+                for (size_t i = begin; i < end; ++i) {
+                    uint64_t h = compute_hash(entries[i].key);
+                    const size_t slot = (h >> shift_) & dir_mask_;
+                    local_counts[t][slot]++;
+                    local_bloom[t][slot] |= Bloom::make_tag_from_hash(h);
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+
+        for (size_t t = 0; t < nthreads; ++t) {
+            for (size_t slot = 0; slot < dir_size_; ++slot) {
+                counts_[slot] += local_counts[t][slot];
+                bloom_filters_[slot] |= local_bloom[t][slot];
+            }
+        }
+
+        // 2) Prefix sums (serial)
+        uint32_t cumulative = 0;
+        for (std::size_t i = 0; i < dir_size_; ++i) {
+            directory_offsets_[i] = cumulative;
+            cumulative += counts_[i];
+        }
+        directory_offsets_[dir_size_] = cumulative;
+
+        // 3) Allocate tuples via slab-aware allocator
+        tuples_.assign(cumulative, entry_type{});
+
+        // 4) Parallel copy with atomic write pointers (static storage to avoid atomic moves)
+        if (!write_ptrs_atomic_ || write_ptrs_atomic_size_ != dir_size_) {
+            write_ptrs_atomic_.reset(new std::atomic<uint32_t>[dir_size_]);
+            write_ptrs_atomic_size_ = dir_size_;
+        }
+        for (size_t i = 0; i < dir_size_; ++i) {
+            write_ptrs_atomic_[i].store(directory_offsets_[i], std::memory_order_relaxed);
+        }
+
+        threads.clear();
+        for (size_t t = 0; t < nthreads; ++t) {
+            const size_t begin = t * block;
+            const size_t end = std::min(n, begin + block);
+            if (begin >= end) break;
+            threads.emplace_back([&, begin, end]() {
+                for (size_t i = begin; i < end; ++i) {
+                    uint64_t h = compute_hash(entries[i].key);
+                    const size_t slot = (h >> shift_) & dir_mask_;
+                    const uint32_t pos = write_ptrs_atomic_[slot].fetch_add(1, std::memory_order_relaxed);
+                    tuples_[pos].key = entries[i].key;
+                    tuples_[pos].row_id = entries[i].row_id;
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+    }
+
+    static bool experimental_parallel_build_enabled() {
+        static const bool enabled = [] {
+            const char* v = std::getenv("EXP_PARALLEL_BUILD");
+            return v && *v && *v != '0';
+        }();
+        return enabled;
+    }
+
+    static bool required_partition_build_enabled() {
+        // Default: enabled to satisfy the assignment. Set REQ_PARTITION_BUILD=0 to disable.
+        static const bool enabled = [] {
+            const char* v = std::getenv("REQ_PARTITION_BUILD");
+        
+            return v && *v && *v != '0';
+        }();
+        return enabled;
+    }
+
+    static std::size_t required_partition_build_min_rows() {
+        // Optional threshold to avoid overhead on tiny builds.
+        // Default: 0 (always use required algorithm when enabled).
+        static const std::size_t min_rows = [] {
+            const char* v = std::getenv("REQ_PARTITION_BUILD_MIN_ROWS");
+            if (!v || !*v) return std::size_t(0);
+            const long parsed = std::strtol(v, nullptr, 10);
+            if (parsed < 0) return std::size_t(0);
+            return static_cast<std::size_t>(parsed);
+        }();
+        return min_rows;
+    }
+
+    struct TmpEntry {
+        Key key;
+        uint32_t row_id;
+        uint16_t tag;
+    };
+
+    static constexpr uint32_t kChunkCap = 256;
+
+    struct Chunk {
+        Chunk* next;
+        uint32_t size;
+        TmpEntry items[kChunkCap];
+    };
+
+    struct ChunkList {
+        Chunk* head = nullptr;
+        Chunk* tail = nullptr;
+    };
+
+    struct TempAlloc {
+    std::vector<void*> heap_allocs;
+
+    explicit TempAlloc(bool /*enable_slab*/) {}  // Ignore the parameter - always use malloc
+
+    void* alloc(std::size_t bytes, std::size_t align) {
+        (void)align;
+        void* p = ::operator new(bytes);
+        heap_allocs.push_back(p);
+        return p;
+    }
+
+    ~TempAlloc() {
+        for (void* p : heap_allocs) ::operator delete(p);
+    }
+};
+
+    static inline Chunk* alloc_chunk(TempAlloc& alloc) {
+        void* mem = alloc.alloc(sizeof(Chunk), alignof(Chunk));
+        auto* c = new (mem) Chunk();
+        c->next = nullptr;
+        c->size = 0;
+        return c;
+    }
+
+    static inline void chunklist_push(ChunkList& list, const TmpEntry& e, TempAlloc& alloc) {
+        if (!list.tail || list.tail->size == kChunkCap) {
+            Chunk* c = alloc_chunk(alloc);
+            if (!list.head) list.head = c;
+            else list.tail->next = c;
+            list.tail = c;
+        }
+        list.tail->items[list.tail->size++] = e;
+    }
+
+    // Required algorithm: phase-based partition -> gather/count -> prefix sums -> one-writer-per-partition copy.
+    void build_from_entries_partitioned_parallel(const std::vector<Contest::HashEntry<Key>>& entries) {
+        if (entries.empty()) {
+            std::fill(directory_offsets_.begin(), directory_offsets_.end(), 0);
+            std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
+            tuples_.clear();
+            return;
+        }
+
+        std::size_t hw = std::thread::hardware_concurrency();
+        if (!hw) hw = 4;
+        const std::size_t n = entries.size();
+        const std::size_t nthreads = (n < 2048) ? 1 : hw;
+
+        const bool use_slab = Contest::ThreeLevelSlab::enabled();
+
+        // Phase 1: partition into per-thread chunk lists (per directory slot).
+        std::vector<std::vector<ChunkList>> lists(nthreads, std::vector<ChunkList>(dir_size_));
+        std::vector<std::unique_ptr<TempAlloc>> allocs;
+        allocs.reserve(nthreads);
+        for (std::size_t t = 0; t < nthreads; ++t) allocs.emplace_back(std::make_unique<TempAlloc>(use_slab));
+
+        const std::size_t block = (n + nthreads - 1) / nthreads;
+        std::vector<std::thread> threads;
+        threads.reserve(nthreads);
+
+        for (std::size_t t = 0; t < nthreads; ++t) {
+            const std::size_t begin = t * block;
+            const std::size_t end = std::min(n, begin + block);
+            if (begin >= end) break;
+            threads.emplace_back([&, t, begin, end]() {
+                auto& my_lists = lists[t];
+                TempAlloc& my_alloc = *allocs[t];
+                for (std::size_t i = begin; i < end; ++i) {
+                    const uint64_t h = compute_hash(entries[i].key);
+                    const std::size_t slot = (h >> shift_) & dir_mask_;
+                    const uint16_t tag = Bloom::make_tag_from_hash(h);
+                    chunklist_push(my_lists[slot], TmpEntry{entries[i].key, entries[i].row_id, tag}, my_alloc);
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+
+        // Phase 2: one-writer-per-partition counts and blooms.
+        if (counts_.size() != dir_size_) counts_.assign(dir_size_, 0);
+        else std::fill(counts_.begin(), counts_.end(), 0);
+        std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
+
+        threads.clear();
+        const std::size_t workers = nthreads;
+        for (std::size_t t = 0; t < workers; ++t) {
+            threads.emplace_back([&, t]() {
+                for (std::size_t slot = t; slot < dir_size_; slot += workers) {
+                    uint32_t c = 0;
+                    uint16_t bloom = 0;
+                    for (std::size_t src = 0; src < nthreads; ++src) {
+                        for (Chunk* ch = lists[src][slot].head; ch; ch = ch->next) {
+                            c += ch->size;
+                            for (uint32_t i = 0; i < ch->size; ++i) bloom |= ch->items[i].tag;
+                        }
+                    }
+                    counts_[slot] = c;
+                    bloom_filters_[slot] = bloom;
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+
+        // Prefix sums (serial; barrier already happened).
+        uint32_t cumulative = 0;
+        for (std::size_t i = 0; i < dir_size_; ++i) {
+            directory_offsets_[i] = cumulative;
+            cumulative += counts_[i];
+        }
+        directory_offsets_[dir_size_] = cumulative;
+
+        tuples_.assign(cumulative, entry_type{});
+
+        // Phase 3: one-writer-per-partition copy.
+        threads.clear();
+        for (std::size_t t = 0; t < workers; ++t) {
+            threads.emplace_back([&, t]() {
+                for (std::size_t slot = t; slot < dir_size_; slot += workers) {
+                    uint32_t pos = directory_offsets_[slot];
+                    for (std::size_t src = 0; src < nthreads; ++src) {
+                        for (Chunk* ch = lists[src][slot].head; ch; ch = ch->next) {
+                            for (uint32_t i = 0; i < ch->size; ++i) {
+                                tuples_[pos].key = ch->items[i].key;
+                                tuples_[pos].row_id = ch->items[i].row_id;
+                                ++pos;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+    }
+
+    void build_from_zero_copy_int32_partitioned_parallel(const Column* src_column,
+                                                         const std::vector<std::size_t>& page_offsets,
+                                                         std::size_t num_rows) {
+        if (num_rows == 0 || src_column == nullptr || page_offsets.size() < 2) {
+            std::fill(directory_offsets_.begin(), directory_offsets_.end(), 0);
+            std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
+            tuples_.clear();
+            return;
+        }
+
+        std::size_t hw = std::thread::hardware_concurrency();
+        if (!hw) hw = 4;
+        const std::size_t nthreads = (num_rows < 2048) ? 1 : hw;
+        const bool use_slab = Contest::ThreeLevelSlab::enabled();
+
+        std::vector<std::vector<ChunkList>> lists(nthreads, std::vector<ChunkList>(dir_size_));
+        std::vector<std::unique_ptr<TempAlloc>> allocs;
+        allocs.reserve(nthreads);
+        for (std::size_t t = 0; t < nthreads; ++t) allocs.emplace_back(std::make_unique<TempAlloc>(use_slab));
+
+        const std::size_t block = (num_rows + nthreads - 1) / nthreads;
+        std::vector<std::thread> threads;
+        threads.reserve(nthreads);
+
+        for (std::size_t t = 0; t < nthreads; ++t) {
+            const std::size_t begin_row = t * block;
+            const std::size_t end_row = std::min(num_rows, begin_row + block);
+            if (begin_row >= end_row) break;
+            threads.emplace_back([&, t, begin_row, end_row]() {
+                auto& my_lists = lists[t];
+                TempAlloc& my_alloc = *allocs[t];
+
+                // Find starting page by binary search.
+                std::size_t page_idx = 0;
+                if (begin_row >= page_offsets[1]) {
+                    std::size_t left = 0, right = page_offsets.size() - 1;
+                    while (left < right - 1) {
+                        std::size_t mid = (left + right) / 2;
+                        if (begin_row < page_offsets[mid]) right = mid;
+                        else left = mid;
+                    }
+                    page_idx = left;
+                }
+
+                std::size_t base = page_offsets[page_idx];
+                std::size_t next = page_offsets[page_idx + 1];
+                auto* page = src_column->pages[page_idx]->data;
+                auto* data = reinterpret_cast<const int32_t*>(page + 4);
+
+                for (std::size_t row = begin_row; row < end_row; ++row) {
+                    while (row >= next) {
+                        ++page_idx;
+                        base = page_offsets[page_idx];
+                        next = page_offsets[page_idx + 1];
+                        page = src_column->pages[page_idx]->data;
+                        data = reinterpret_cast<const int32_t*>(page + 4);
+                    }
+                    const Key key = static_cast<Key>(data[row - base]);
+                    const uint64_t h = compute_hash(key);
+                    const std::size_t slot = (h >> shift_) & dir_mask_;
+                    const uint16_t tag = Bloom::make_tag_from_hash(h);
+                    chunklist_push(my_lists[slot], TmpEntry{key, static_cast<uint32_t>(row), tag}, my_alloc);
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+
+        if (counts_.size() != dir_size_) counts_.assign(dir_size_, 0);
+        else std::fill(counts_.begin(), counts_.end(), 0);
+        std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
+
+        threads.clear();
+        const std::size_t workers = nthreads;
+        for (std::size_t t = 0; t < workers; ++t) {
+            threads.emplace_back([&, t]() {
+                for (std::size_t slot = t; slot < dir_size_; slot += workers) {
+                    uint32_t c = 0;
+                    uint16_t bloom = 0;
+                    for (std::size_t src = 0; src < nthreads; ++src) {
+                        for (Chunk* ch = lists[src][slot].head; ch; ch = ch->next) {
+                            c += ch->size;
+                            for (uint32_t i = 0; i < ch->size; ++i) bloom |= ch->items[i].tag;
+                        }
+                    }
+                    counts_[slot] = c;
+                    bloom_filters_[slot] = bloom;
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+
+        uint32_t cumulative = 0;
+        for (std::size_t i = 0; i < dir_size_; ++i) {
+            directory_offsets_[i] = cumulative;
+            cumulative += counts_[i];
+        }
+        directory_offsets_[dir_size_] = cumulative;
+
+        tuples_.assign(cumulative, entry_type{});
+
+        threads.clear();
+        for (std::size_t t = 0; t < workers; ++t) {
+            threads.emplace_back([&, t]() {
+                for (std::size_t slot = t; slot < dir_size_; slot += workers) {
+                    uint32_t pos = directory_offsets_[slot];
+                    for (std::size_t src = 0; src < nthreads; ++src) {
+                        for (Chunk* ch = lists[src][slot].head; ch; ch = ch->next) {
+                            for (uint32_t i = 0; i < ch->size; ++i) {
+                                tuples_[pos].key = ch->items[i].key;
+                                tuples_[pos].row_id = ch->items[i].row_id;
+                                ++pos;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+    }
+
     /*
      * probe_exact():
      * Helper για exact key matching
@@ -343,14 +754,16 @@ private:
 
     Hasher hasher_;
     
-    // FLAT STORAGE - Optimized layout
-    std::vector<entry_type> tuples_;            // Contiguous tuples (sorted by prefix)
+    // FLAT STORAGE - Optimized layout (tuples_ uses slab-aware allocator with runtime toggle)
+    std::vector<entry_type, entry_allocator> tuples_; // Contiguous tuples (sorted by prefix)
     std::vector<uint32_t> directory_offsets_;   // Prefix sums (size = dir_size + 1)
     std::vector<uint16_t> bloom_filters_;       // Bloom filters (size = dir_size)
 
     // Reused scratch buffers to avoid per-build allocations.
     std::vector<uint32_t> counts_;              // Counts per slot
-    std::vector<uint32_t> write_ptrs_;          // Write pointers per slot
+    std::vector<uint32_t> write_ptrs_;          // Write pointers per slot (serial path)
+    std::unique_ptr<std::atomic<uint32_t>[]> write_ptrs_atomic_; // Parallel path (fixed-size buffer)
+    std::size_t write_ptrs_atomic_size_ = 0;
     
     std::size_t dir_size_;   // Number of directory slots
     std::size_t dir_mask_;   // Bitmask for prefix extraction

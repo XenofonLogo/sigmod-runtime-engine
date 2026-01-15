@@ -29,10 +29,11 @@ struct QueryTelemetry {
 
 static inline bool join_telemetry_enabled() {
     // (GR) Προαιρετικά stats για να δούμε αν είμαστε memory-bandwidth bound.
-    // Ενεργοποίηση: JOIN_TELEMETRY=1
+    // Default: ENABLED for performance. Set JOIN_TELEMETRY=0 to disable.
     static const bool enabled = [] {
         const char* v = std::getenv("JOIN_TELEMETRY");
-        return v && *v && *v != '0';
+        if (!v) return true;  // Default to enabled
+        return *v && *v != '0';
     }();
     return enabled;
 }
@@ -49,12 +50,24 @@ static inline bool auto_build_side_enabled() {
 }
 
 static inline bool join_global_bloom_enabled() {
-    // Default: disabled. Set JOIN_GLOBAL_BLOOM=1 to enable.
-    // (GR) Προαιρετικό global bloom πριν το probe: μειώνει probes σε άσχετα keys.
+    // Default: ENABLED for performance. Set JOIN_GLOBAL_BLOOM=0 to disable.
+    // (GR) Global bloom πριν το probe: μειώνει probes σε άσχετα keys.
     // Χρήσιμο όταν probe πλευρά είναι τεράστια και το selectivity είναι μικρό.
     static const bool enabled = [] {
         const char* v = std::getenv("JOIN_GLOBAL_BLOOM");
-        return v && *v && *v != '0';
+        if (!v || !*v) return true;  // Default: enabled
+        return *v != '0';
+    }();
+    return enabled;
+}
+
+static inline bool req_build_from_pages_enabled() {
+    // Default: enabled (meets assignment requirement for INT32 no-NULL columns).
+    // Set REQ_BUILD_FROM_PAGES=0 to force the old vector<HashEntry> build path.
+    static const bool enabled = [] {
+        const char* v = std::getenv("REQ_BUILD_FROM_PAGES");
+        if (!v) return true;
+        return *v && *v != '0';
     }();
     return enabled;
 }
@@ -210,42 +223,77 @@ struct JoinAlgorithm {
         auto table = create_hashtable<Key>();
 
         const auto &build_col = build_buf->columns[build_key_col];
-        std::vector<HashEntry<Key>> entries;
-        entries.reserve(build_buf->num_rows);
-
-        if (build_col.is_zero_copy && build_col.src_column != nullptr && build_col.page_offsets.size() >= 2) {
-            // (GR) Zero-copy INT32: χωρίς NULLs, άρα μπορούμε να κάνουμε bulk extract keys
-            // απευθείας από τις pages χωρίς value_t materialization.
-            const auto &offs = build_col.page_offsets;
-            const size_t npages = offs.size() - 1;
-            for (size_t page_idx = 0; page_idx < npages; ++page_idx) {
-                const size_t base = offs[page_idx];
-                const size_t end = offs[page_idx + 1];
-                const size_t n = end - base;
-                auto *page = build_col.src_column->pages[page_idx]->data;
-                auto *data = reinterpret_cast<const int32_t *>(page + 4);
-                for (size_t slot = 0; slot < n; ++slot) {
-                    entries.push_back(HashEntry<Key>{static_cast<Key>(data[slot]), static_cast<uint32_t>(base + slot)});
-                }
-            }
-        } else {
-            for (size_t i = 0; i < build_buf->num_rows; ++i) {
-                const value_t &v = build_col.pages[i / build_col.values_per_page][i % build_col.values_per_page];
-                if (!v.is_null()) entries.push_back(HashEntry<Key>{v.as_i32(), static_cast<uint32_t>(i)});
-            }
-        }
-
-        if (entries.empty()) return;
 
         GlobalBloom bloom;
         const bool use_global_bloom = join_global_bloom_enabled();
-        if (use_global_bloom) {
-            bloom.init(join_global_bloom_bits());
-            for (const auto &e : entries) bloom.add_i32(e.key);
-        }
+        if (use_global_bloom) bloom.init(join_global_bloom_bits());
 
-        table->reserve(entries.size());
-        table->build_from_entries(entries);
+        // -----------------------------------------------------------------
+        // Build side: prefer building directly from the input INT32 pages
+        // (no NULLs) to avoid copying/materializing the column.
+        // Toggle: REQ_BUILD_FROM_PAGES=0 disables this.
+        // -----------------------------------------------------------------
+        const bool can_build_from_pages = req_build_from_pages_enabled() &&
+                                          build_col.is_zero_copy && build_col.src_column != nullptr &&
+                                          build_col.page_offsets.size() >= 2;
+
+        std::vector<HashEntry<Key>> entries;
+        size_t build_rows_effective = 0;
+
+        if (can_build_from_pages) {
+            // Build bloom from pages (still needed for early reject in probe).
+            if (use_global_bloom) {
+                const auto &offs = build_col.page_offsets;
+                const size_t npages = offs.size() - 1;
+                for (size_t page_idx = 0; page_idx < npages; ++page_idx) {
+                    const size_t base = offs[page_idx];
+                    const size_t end = offs[page_idx + 1];
+                    const size_t n = end - base;
+                    auto *page = build_col.src_column->pages[page_idx]->data;
+                    auto *data = reinterpret_cast<const int32_t *>(page + 4);
+                    for (size_t slot = 0; slot < n; ++slot) bloom.add_i32(data[slot]);
+                }
+            }
+
+            const bool built = table->build_from_zero_copy_int32(build_col.src_column,
+                                                                build_col.page_offsets,
+                                                                build_buf->num_rows);
+            if (!built) {
+                // Fall back to the old entries path if the table doesn't support it.
+                entries.reserve(build_buf->num_rows);
+                for (size_t i = 0; i < build_buf->num_rows; ++i) {
+                    const value_t &v = build_col.pages[i / build_col.values_per_page][i % build_col.values_per_page];
+                    if (!v.is_null()) {
+                        entries.push_back(HashEntry<Key>{v.as_i32(), static_cast<uint32_t>(i)});
+                    }
+                }
+                if (entries.empty()) return;
+                if (use_global_bloom) {
+                    // Rebuild bloom from entries for correctness.
+                    bloom.init(join_global_bloom_bits());
+                    for (const auto &e : entries) bloom.add_i32(e.key);
+                }
+                table->reserve(entries.size());
+                table->build_from_entries(entries);
+                build_rows_effective = entries.size();
+            } else {
+                build_rows_effective = build_buf->num_rows;
+            }
+        } else {
+            entries.reserve(build_buf->num_rows);
+            for (size_t i = 0; i < build_buf->num_rows; ++i) {
+                const value_t &v = build_col.pages[i / build_col.values_per_page][i % build_col.values_per_page];
+                if (!v.is_null()) {
+                    entries.push_back(HashEntry<Key>{v.as_i32(), static_cast<uint32_t>(i)});
+                    if (use_global_bloom) bloom.add_i32(v.as_i32());
+                }
+            }
+
+            if (entries.empty()) return;
+            table->reserve(entries.size());
+            table->build_from_entries(entries);
+            build_rows_effective = entries.size();
+        }
 
         struct OutPair {
             uint32_t lidx;
@@ -258,98 +306,105 @@ struct JoinAlgorithm {
 
         // Parallelize only when it pays off.
         // (GR) Για μικρά inputs το overhead των threads είναι μεγαλύτερο από το κέρδος.
-        const size_t nthreads = (probe_n >= (1u << 19)) ? hw : 1;
+        const size_t nthreads = (probe_n >= (1u << 18)) ? hw : 1;
         std::vector<std::vector<OutPair>> out_by_thread(nthreads);
 
-        auto probe_range = [&](size_t tid, size_t begin_j, size_t end_j) {
+        // Work stealing with atomic counter for dynamic load balancing
+        std::atomic<size_t> work_counter{0};
+        const size_t work_block_size = std::max(size_t(256), probe_n / (nthreads * 16)); // balanced block size for load stealing
+
+        auto probe_range_with_stealing = [&](size_t tid) {
             auto &local = out_by_thread[tid];
-            local.reserve((end_j - begin_j) / 16 + 256);
+            local.reserve(probe_n / nthreads + 256);
 
-            const auto &probe_col = probe_buf->columns[probe_key_col];
+            while (true) {
+                // Try to steal a block of work
+                size_t begin_j = work_counter.fetch_add(work_block_size, std::memory_order_acquire);
+                if (begin_j >= probe_n) break;
+                
+                size_t end_j = std::min(probe_n, begin_j + work_block_size);
 
-            if (probe_col.is_zero_copy && probe_col.src_column != nullptr && probe_col.page_offsets.size() >= 2) {
-                // (GR) Probe range είναι συνεχές (contiguous) -> κρατάμε per-thread page cursor,
-                // ώστε να αποφεύγουμε binary search στο page_offsets για κάθε row.
-                const auto &offs = probe_col.page_offsets;
-                size_t page_idx = 0;
-                if (begin_j >= offs[1]) {
-                    size_t left = 0, right = offs.size() - 1;
-                    while (left < right - 1) {
-                        size_t mid = (left + right) / 2;
-                        if (begin_j < offs[mid]) right = mid;
-                        else left = mid;
-                    }
-                    page_idx = left;
-                }
+                const auto &probe_col = probe_buf->columns[probe_key_col];
 
-                size_t base = offs[page_idx];
-                size_t next = offs[page_idx + 1];
-                auto *page = probe_col.src_column->pages[page_idx]->data;
-                auto *data = reinterpret_cast<const int32_t *>(page + 4);
-
-                for (size_t j = begin_j; j < end_j; ++j) {
-                    while (j >= next) {
-                        ++page_idx;
-                        base = offs[page_idx];
-                        next = offs[page_idx + 1];
-                        page = probe_col.src_column->pages[page_idx]->data;
-                        data = reinterpret_cast<const int32_t *>(page + 4);
+                if (probe_col.is_zero_copy && probe_col.src_column != nullptr && probe_col.page_offsets.size() >= 2) {
+                    // (GR) Probe range είναι συνεχές (contiguous) -> κρατάμε per-thread page cursor,
+                    // ώστε να αποφεύγουμε binary search στο page_offsets για κάθε row.
+                    const auto &offs = probe_col.page_offsets;
+                    size_t page_idx = 0;
+                    if (begin_j >= offs[1]) {
+                        size_t left = 0, right = offs.size() - 1;
+                        while (left < right - 1) {
+                            size_t mid = (left + right) / 2;
+                            if (begin_j < offs[mid]) right = mid;
+                            else left = mid;
+                        }
+                        page_idx = left;
                     }
 
-                    const int32_t probe_key = data[j - base];
+                    size_t base = offs[page_idx];
+                    size_t next = offs[page_idx + 1];
+                    auto *page = probe_col.src_column->pages[page_idx]->data;
+                    auto *data = reinterpret_cast<const int32_t *>(page + 4);
 
-                    if (use_global_bloom && !bloom.maybe_contains_i32(probe_key)) continue;
+                    for (size_t j = begin_j; j < end_j; ++j) {
+                        while (j >= next) {
+                            ++page_idx;
+                            base = offs[page_idx];
+                            next = offs[page_idx + 1];
+                            page = probe_col.src_column->pages[page_idx]->data;
+                            data = reinterpret_cast<const int32_t *>(page + 4);
+                        }
 
-                    size_t len = 0;
-                    const auto *bucket = table->probe(probe_key, len);
-                    if (!bucket || len == 0) continue;
+                        const int32_t probe_key = data[j - base];
 
-                    for (size_t k = 0; k < len; ++k) {
-                        if (bucket[k].key != probe_key) continue;
-                        const uint32_t build_row = bucket[k].row_id;
-                        if (build_left)
-                            local.push_back(OutPair{build_row, static_cast<uint32_t>(j)});
-                        else
-                            local.push_back(OutPair{static_cast<uint32_t>(j), build_row});
+                        if (use_global_bloom && !bloom.maybe_contains_i32(probe_key)) continue;
+
+                        size_t len = 0;
+                        const auto *bucket = table->probe(probe_key, len);
+                        if (!bucket || len == 0) continue;
+
+                        for (size_t k = 0; k < len; ++k) {
+                            if (bucket[k].key != probe_key) continue;
+                            const uint32_t build_row = bucket[k].row_id;
+                            if (build_left)
+                                local.push_back(OutPair{build_row, static_cast<uint32_t>(j)});
+                            else
+                                local.push_back(OutPair{static_cast<uint32_t>(j), build_row});
+                        }
                     }
-                }
+                } else {
+                    // Materialized probe path
+                    for (size_t j = begin_j; j < end_j; ++j) {
+                        const value_t &v = probe_col.pages[j / probe_col.values_per_page][j % probe_col.values_per_page];
+                        if (v.is_null()) continue;
+                        const int32_t probe_key = v.as_i32();
 
-                return;
-            }
+                        if (use_global_bloom && !bloom.maybe_contains_i32(probe_key)) continue;
 
-            for (size_t j = begin_j; j < end_j; ++j) {
-                const value_t &v = probe_col.pages[j / probe_col.values_per_page][j % probe_col.values_per_page];
-                if (v.is_null()) continue;
-                const int32_t probe_key = v.as_i32();
+                        size_t len = 0;
+                        const auto *bucket = table->probe(probe_key, len);
+                        if (!bucket || len == 0) continue;
 
-                if (use_global_bloom && !bloom.maybe_contains_i32(probe_key)) continue;
-
-                size_t len = 0;
-                const auto *bucket = table->probe(probe_key, len);
-                if (!bucket || len == 0) continue;
-
-                for (size_t k = 0; k < len; ++k) {
-                    if (bucket[k].key != probe_key) continue;
-                    const uint32_t build_row = bucket[k].row_id;
-                    if (build_left)
-                        local.push_back(OutPair{build_row, static_cast<uint32_t>(j)});
-                    else
-                        local.push_back(OutPair{static_cast<uint32_t>(j), build_row});
+                        for (size_t k = 0; k < len; ++k) {
+                            if (bucket[k].key != probe_key) continue;
+                            const uint32_t build_row = bucket[k].row_id;
+                            if (build_left)
+                                local.push_back(OutPair{build_row, static_cast<uint32_t>(j)});
+                            else
+                                local.push_back(OutPair{static_cast<uint32_t>(j), build_row});
+                        }
+                    }
                 }
             }
         };
 
         if (nthreads == 1) {
-            probe_range(0, 0, probe_n);
+            probe_range_with_stealing(0);
         } else {
             std::vector<std::thread> threads;
             threads.reserve(nthreads);
-            const size_t block = (probe_n + nthreads - 1) / nthreads;
             for (size_t t = 0; t < nthreads; ++t) {
-                const size_t begin_j = t * block;
-                const size_t end_j = std::min(probe_n, begin_j + block);
-                if (begin_j >= end_j) break;
-                threads.emplace_back(probe_range, t, begin_j, end_j);
+                threads.emplace_back(probe_range_with_stealing, t);
             }
             for (auto &th : threads) th.join();
         }
@@ -364,7 +419,7 @@ struct JoinAlgorithm {
         const size_t num_output_cols = output_attrs.size();
 
         if (join_telemetry_enabled()) {
-            qt_add_join(static_cast<uint64_t>(entries.size()),
+            qt_add_join(static_cast<uint64_t>(build_rows_effective),
                         static_cast<uint64_t>(probe_n),
                         static_cast<uint64_t>(total_out),
                         static_cast<uint64_t>(num_output_cols));
@@ -406,7 +461,7 @@ struct JoinAlgorithm {
         const size_t out_page_sz = results.columns.empty() ? 1024 : results.columns[0].values_per_page;
         // For very large outputs, materialization can dominate; do it in parallel.
         // (GR) Όταν το αποτέλεσμα είναι τεράστιο, το copy των value_t κυριαρχεί -> parallel fill.
-        const bool parallel_materialize = (nthreads > 1) && (total_out >= (1u << 22));
+        const bool parallel_materialize = (nthreads > 1) && (total_out >= (1u << 20));
 
         if (!parallel_materialize) {
             size_t out_idx = 0;

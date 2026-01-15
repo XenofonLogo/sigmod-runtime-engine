@@ -15,11 +15,12 @@ private:
     UnchainedHashTable<Key> table_;
 
 public:
-    void build_from_zero_copy_int32(const Column* src_column,
+    bool build_from_zero_copy_int32(const Column* src_column,
                                     const std::vector<std::size_t>& page_offsets,
-                                    std::size_t num_rows) {
+                                    std::size_t num_rows) override {
         table_.reserve(num_rows);
         table_.build_from_zero_copy_int32(src_column, page_offsets, num_rows);
+        return true;
     }
 
     // Implementation of IHashTable methods

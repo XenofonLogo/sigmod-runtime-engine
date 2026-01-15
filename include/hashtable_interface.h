@@ -6,6 +6,10 @@
 #include <cstddef>
 #include <stdexcept>
 #include "hash_common.h"
+
+// Column is defined in the engine headers (global namespace).
+struct Column;
+
 namespace Contest {
 
 
@@ -24,6 +28,14 @@ public:
     // - να έχουμε σταθερή διάταξη (layout) και μικρότερο row_id (uint32_t)
     // - να αποφεύγουμε περιττές μετατροπές/allocations σε wrappers
     virtual void build_from_entries(const std::vector<HashEntry<Key>>& entries) = 0;
+
+    // Optional fast-path for INT32 columns with no NULLs.
+    // Implementations that don't support it should keep the default (return false).
+    virtual bool build_from_zero_copy_int32(const Column* /*src_column*/,
+                                           const std::vector<std::size_t>& /*page_offsets*/,
+                                           std::size_t /*num_rows*/) {
+        return false;
+    }
 
     // Probes the hash table for a key.
     // len is set to the number of entries found for the key.
