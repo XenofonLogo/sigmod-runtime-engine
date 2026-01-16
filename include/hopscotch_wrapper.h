@@ -21,6 +21,34 @@ public:
         // Ignored, as Hopscotch manages capacity internally during build
     }
 
+    bool build_from_zero_copy_int32(const Column* src_column,
+                                    const std::vector<std::size_t>& page_offsets,
+                                    std::size_t num_rows) override {
+        // Hopscotch backend doesn't support zero-copy directly, so we materialize entries
+        if (num_rows == 0 || src_column == nullptr || page_offsets.size() < 2) {
+            return false;
+        }
+
+        std::vector<HashEntry<Key>> entries;
+        entries.reserve(num_rows);
+
+        const std::size_t npages = page_offsets.size() - 1;
+        for (std::size_t page_idx = 0; page_idx < npages; ++page_idx) {
+            const std::size_t base = page_offsets[page_idx];
+            const std::size_t end = page_offsets[page_idx + 1];
+            const std::size_t n = end - base;
+            auto* page = src_column->pages[page_idx]->data;
+            auto* data = reinterpret_cast<const int32_t*>(page + 4);
+
+            for (std::size_t i = 0; i < n; ++i) {
+                entries.push_back({static_cast<Key>(data[i]), static_cast<uint32_t>(base + i)});
+            }
+        }
+
+        build_from_entries(entries);
+        return true;
+    }
+
     void build_from_entries(const std::vector<HashEntry<Key>>& entries) override {
         // (GR) Adapter layer: μετατροπή HashEntry -> pair για legacy backend.
         // Κρατάμε το interface ενιαίο ώστε ο executor να είναι βελτιστοποιημένος.

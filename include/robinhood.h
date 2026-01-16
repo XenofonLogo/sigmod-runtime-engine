@@ -122,13 +122,13 @@ public:
             const std::vector<size_t>& row_ids = pair.second;
 
             IndexInfo info;
-            info.key = key;
+            info.key = pair.first;
             info.start_index = current_storage_index;
             info.count = row_ids.size();
             info.is_valid = true;
             index_infos_to_insert.push_back(info);
             for (size_t row_id : row_ids) {
-                _storage.emplace_back(Entry{key, row_id});
+                _storage.emplace_back(Entry{pair.first, static_cast<uint32_t>(row_id)});
             }
             current_storage_index += row_ids.size();
         }

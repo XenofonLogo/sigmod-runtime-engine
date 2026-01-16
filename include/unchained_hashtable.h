@@ -7,6 +7,8 @@
 #include <algorithm>
 #include "hash_functions.h"
 #include "bloom_filter.h"
+#include "hash_common.h"
+#include "plan.h"
 
 /*
  * TupleEntry:
@@ -15,11 +17,15 @@
  * - row_id: τη θέση της πλειάδας στο αρχικό input
  *
  * Χρησιμοποιείται στο ενιαίο buffer των tuples.
+ * 
+ * ΣΗΜΑΝΤΙΚΟ: Χρησιμοποιούμε uint32_t για row_id (όχι size_t)
+ * ώστε να είναι συμβατό με το HashEntry struct και να αποφύγουμε
+ * memory corruption κατά το reinterpret_cast στο wrapper.
  */
 template<typename Key, typename Hasher = Hash::Hasher32>
 struct TupleEntry {
     Key key;
-    std::size_t row_id;
+    uint32_t row_id;
 };
 
 /*
@@ -165,6 +171,98 @@ public:
         for (std::size_t i = 0; i < dir_size_; ++i) {
             directory_[i].begin_idx = offsets[i];
             directory_[i].end_idx   = (i+1 < dir_size_) ? offsets[i+1] : total;
+        }
+    }
+
+    /*
+     * build_from_entries (overload for HashEntry):
+     * Adapter για να δέχεται HashEntry από το wrapper interface.
+     */
+    void build_from_entries(const std::vector<Contest::HashEntry<Key>>& entries) {
+        std::vector<std::pair<Key, std::size_t>> pairs;
+        pairs.reserve(entries.size());
+        for (const auto& e : entries) {
+            pairs.emplace_back(e.key, static_cast<std::size_t>(e.row_id));
+        }
+        build_from_entries(pairs);
+    }
+
+    /*
+     * build_from_zero_copy_int32():
+     * Fast path: build directly from a zero-copy INT32 column (no nulls).
+     * Simplified version (non-parallel) for backward compatibility.
+     */
+    void build_from_zero_copy_int32(const Column* src_column,
+                                    const std::vector<std::size_t>& page_offsets,
+                                    std::size_t num_rows) {
+        if (num_rows == 0 || src_column == nullptr || page_offsets.size() < 2) {
+            for (auto &d : directory_) d = {0,0,0};
+            tuples_.clear();
+            return;
+        }
+
+        static_assert(std::is_same_v<Key, int32_t> || std::is_same_v<Key, uint32_t>,
+                      "build_from_zero_copy_int32 only supports (u)int32 keys");
+
+        tuples_.reserve(num_rows);
+
+        // Reset bloom bits
+        for (auto &d : directory_) d.bloom = 0;
+
+        // PHASE 1: count + bloom
+        std::vector<std::size_t> counts(dir_size_, 0);
+        const std::size_t npages = page_offsets.size() - 1;
+        
+        for (std::size_t page_idx = 0; page_idx < npages; ++page_idx) {
+            const std::size_t base = page_offsets[page_idx];
+            const std::size_t end = page_offsets[page_idx + 1];
+            const std::size_t n = end - base;
+            auto* page = src_column->pages[page_idx]->data;
+            auto* data = reinterpret_cast<const int32_t*>(page + 4);
+            
+            for (std::size_t slot_i = 0; slot_i < n; ++slot_i) {
+                const Key key = static_cast<Key>(data[slot_i]);
+                const uint64_t h = compute_hash(key);
+                const std::size_t prefix = (h >> 16) & dir_mask_;
+                counts[prefix]++;
+                directory_[prefix].bloom |= Bloom::make_tag_from_hash(h);
+            }
+        }
+
+        // PHASE 2: prefix sums
+        std::vector<std::size_t> offsets(dir_size_, 0);
+        std::size_t total = 0;
+        for (std::size_t i = 0; i < dir_size_; ++i) {
+            offsets[i] = total;
+            total += counts[i];
+        }
+
+        // PHASE 3: allocate tuples
+        tuples_.assign(total, entry_type{});
+
+        // PHASE 4: write tuples
+        std::vector<std::size_t> write_ptr = offsets;
+        for (std::size_t page_idx = 0; page_idx < npages; ++page_idx) {
+            const std::size_t base = page_offsets[page_idx];
+            const std::size_t end = page_offsets[page_idx + 1];
+            const std::size_t n = end - base;
+            auto* page = src_column->pages[page_idx]->data;
+            auto* data = reinterpret_cast<const int32_t*>(page + 4);
+            
+            for (std::size_t slot_i = 0; slot_i < n; ++slot_i) {
+                const Key key = static_cast<Key>(data[slot_i]);
+                const uint64_t h = compute_hash(key);
+                const std::size_t prefix = (h >> 16) & dir_mask_;
+                const std::size_t pos = write_ptr[prefix]++;
+                tuples_[pos].key = key;
+                tuples_[pos].row_id = static_cast<uint32_t>(base + slot_i);
+            }
+        }
+
+        // PHASE 5: set directory ranges
+        for (std::size_t i = 0; i < dir_size_; ++i) {
+            directory_[i].begin_idx = offsets[i];
+            directory_[i].end_idx = (i+1 < dir_size_) ? offsets[i+1] : total;
         }
     }
 

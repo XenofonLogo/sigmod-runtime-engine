@@ -461,14 +461,19 @@ public:
 
     struct TempAlloc {
     std::vector<void*> heap_allocs;
+    Contest::ThreeLevelSlab::PartitionArena slab_arena;
+    bool use_slab_;
 
-    explicit TempAlloc(bool /*enable_slab*/) {}  // Ignore the parameter - always use malloc
+    explicit TempAlloc(bool enable_slab) : use_slab_(enable_slab) {}
 
     void* alloc(std::size_t bytes, std::size_t align) {
-        (void)align;
-        void* p = ::operator new(bytes);
-        heap_allocs.push_back(p);
-        return p;
+        if (use_slab_) {
+            return slab_arena.alloc(bytes, align);
+        } else {
+            void* p = ::operator new(bytes);
+            heap_allocs.push_back(p);
+            return p;
+        }
     }
 
     ~TempAlloc() {

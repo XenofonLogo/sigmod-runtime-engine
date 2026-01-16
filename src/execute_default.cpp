@@ -10,10 +10,10 @@
 #include "hashtable_interface.h" 
 
 // Hash Table Implementations:
-#include "unchained_hashtable_wrapper.h"
+#include "unchained_hashtable_wrapper.h"  // Using PARALLEL unchained (fastest)
 //#include "robinhood_wrapper.h"
 //#include "cuckoo_wrapper.h"
-// #include "hopscotch_wrapper.h" 
+ //#include "hopscotch_wrapper.h" 
 namespace Contest {
 
 namespace {
