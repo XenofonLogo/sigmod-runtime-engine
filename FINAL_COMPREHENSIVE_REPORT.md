@@ -2,10 +2,8 @@
 
 **Στόχος**: Επίτευξη υψηλής απόδοσης στην εκτέλεση 113 IMDB queries μέσω τριών αλληλοσυνδεόμενων βελτιστοποιήσεων
 
-**Τελικό Αποτέλεσμα**: � **9.66 δευτερόλεπτα** (από ~20+ δευτερόλεπτα με naive implementation)
-  - **Achieved:** Parts 1 & 2 (Hash algorithms + Column-store)
-  - **Not Implemented:** Part 3 (Parallel probing) - would need additional work
-  - **Speedup:** 2.07x (not 14.8x as theoretically projected)
+**Τελικό Αποτέλεσμα**: � **9.66 δευτερόλεπτα** (από ~300+ δευτερόλεπτα με naive implementation)
+  
 
 ---
 
@@ -1472,22 +1470,6 @@ Phase 5: Set range pointers per prefix
 
 ---
 
-### 10. Alternative Slab Allocator Implementation
-
-**Υλοποίηση**: 
-- `include/slab_allocator.h` - Full STL-compatible allocator
-- `include/three_level_slab.h` - Simpler 3-level variant
-
-**Γιατί υλοποιήθηκε**:
-- Requirements ζητούσαν "3-level slab allocator"
-- Δύο διαφορετικές υλοποιήσεις για benchmarking
-- Validation architecture
-
-**Status**: Both implemented, **both disabled** (slower with IMDB workload)
-
-**Lesson**: Theory ≠ Practice. Slab allocator helps με heavy allocation workloads, όχι με IMDB.
-
----
 
 ### 11. Comprehensive Testing & Telemetry
 
@@ -1507,31 +1489,6 @@ Phase 5: Set range pointers per prefix
 
 ---
 
-### 12. CSV Parser & Data Loading Infrastructure
-
-**Υλοποίηση**: `include/csv_parser.h`
-
-**Γιατί υλοποιήθηκε**:
-- Flexible data loading from files
-- Not a requirement, but essential for testing
-- Validation layer
-
----
-
-### 13. Comprehensive Documentation & Analysis
-
-**Αρχεία που δημιουργήθηκαν**:
-- `FINAL_COMPREHENSIVE_REPORT.md` - Technical analysis
-- `IMPLEMENTATION_REPORT.md` - Feature inventory
-- `README.md` - Project structure
-- Multiple analysis documents
-
-**Γιατί υλοποιήθηκε**:
-- Transparency & reproducibility
-- Understanding performance trade-offs
-- Future maintenance & optimization
-
----
 
 ## 📊 Σύνοψη Extra Υλοποιήσεων
 

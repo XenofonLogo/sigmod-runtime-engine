@@ -13,7 +13,6 @@
 #include "hash_common.h"
 #include "hash_functions.h"
 #include "bloom_filter.h"
-#include "slab_allocator.h"
 #include "three_level_slab.h"
 
 /*
@@ -60,7 +59,7 @@ template<typename Key, typename Hasher = Hash::Hasher32>
 class FlatUnchainedHashTable {
 public:
     using entry_type = TupleEntry<Key>;
-    using entry_allocator = Contest::SlabAllocator<entry_type>;
+    using entry_allocator = std::allocator<entry_type>;  // Use standard allocator (slab has no perf benefit)
 
     explicit FlatUnchainedHashTable(Hasher hasher = Hasher(), std::size_t directory_power = 10)
         : hasher_(hasher)
