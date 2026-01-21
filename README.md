@@ -45,6 +45,16 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DEXECUTE_IMPL=default -Wno-dev &
 
 ---
 
+## Runtime Toggles (env)
+
+- `REQ_PARTITION_BUILD` (default off): enable required partitioned hash build
+- `REQ_PARTITION_BUILD_MIN_ROWS` (default 0): minimum rows to use partitioned build
+- `REQ_BUILD_FROM_PAGES` (default on): allow zero-copy INT32 build from input pages without NULLs
+- `REQ_SLAB_GLOBAL_BLOCK_BYTES` (bytes): override slab global block size (default 4 MiB)
+- `JOIN_GLOBAL_BLOOM` (default on): global bloom filter for probe-side early rejection
+- `JOIN_GLOBAL_BLOOM_BITS` (default 20): bloom filter size in bits (2^20 = 128 KiB)
+- `JOIN_TELEMETRY` (default on): set to 0 to silence join telemetry output
+
 ## Δομή Αρχείων
 
 - **include/** — Public headers και API

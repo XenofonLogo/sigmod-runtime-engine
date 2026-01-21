@@ -1,5 +1,4 @@
 #pragma once
-#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -11,96 +10,38 @@
 #include "statement.h"
 
 struct FilterThreadPool {
-    std::vector<std::thread>                              threads;
-    std::vector<std::unique_ptr<std::mutex>>              mtxes;
-    std::vector<std::unique_ptr<std::condition_variable>> cvs;
-    std::vector<uint8_t>                                  has_function;
-    std::vector<uint8_t>                                  finished;
-    std::vector<uint8_t>                                  destructed;
-    std::function<void(size_t, size_t)>                   function;
-    size_t                                                num_tasks;
+    size_t num_threads;
 
-    size_t begin_idx(size_t thread_id) {
-        size_t base = num_tasks / threads.size();
-        size_t rem  = num_tasks % threads.size();
+    explicit FilterThreadPool(unsigned num_threads)
+    : num_threads(num_threads ? num_threads : 1) {}
+
+    size_t begin_idx(size_t thread_id, size_t tasks) const {
+        const size_t base = tasks / num_threads;
+        const size_t rem  = tasks % num_threads;
         return thread_id * base + std::min(thread_id, rem);
     }
 
-    void run_loop(size_t thread_id) {
-        auto& mtx = *mtxes[thread_id];
-        auto& cv  = *cvs[thread_id];
-        for (;;) {
-            std::unique_lock<std::mutex> lk(mtx);
-            cv.wait(lk, [this, thread_id] {
-                return destructed[thread_id]
-                    or (has_function[thread_id] and not finished[thread_id]);
+    void run(std::function<void(size_t, size_t)> function, size_t tasks) {
+        if (tasks == 0) return;
+
+        const size_t nt = num_threads ? num_threads : 1;
+        std::vector<std::thread> threads;
+        threads.reserve(nt ? nt - 1 : 0);
+
+        for (size_t t = 0; t + 1 < nt; ++t) {
+            threads.emplace_back([&, t]() {
+                const size_t begin = begin_idx(t, tasks);
+                const size_t end   = begin_idx(t + 1, tasks);
+                if (begin < end) function(begin, end);
             });
-            if (destructed[thread_id]) {
-                break;
-            }
-            size_t begin = begin_idx(thread_id);
-            size_t end   = begin_idx(thread_id + 1);
-            if (begin < end) {
-                function(begin, end);
-            }
-            finished[thread_id] = true;
-            lk.unlock();
-            cv.notify_one();
         }
-    }
 
-    FilterThreadPool(unsigned num_threads) {
-        for (unsigned i = 0; i < num_threads; ++i) {
-            mtxes.emplace_back(std::make_unique<std::mutex>());
-            cvs.emplace_back(std::make_unique<std::condition_variable>());
-        }
-        has_function.resize(num_threads);
-        finished.resize(num_threads);
-        destructed.resize(num_threads, 0);
-        for (unsigned i = 0; i < num_threads; ++i) {
-            threads.emplace_back([this, i] { run_loop(i); });
-        }
-    }
+        // Execute last shard on calling thread to avoid extra join/creation overhead.
+        const size_t begin_last = begin_idx(nt - 1, tasks);
+        const size_t end_last   = begin_idx(nt, tasks);
+        if (begin_last < end_last) function(begin_last, end_last);
 
-    FilterThreadPool(const FilterThreadPool&)            = delete;
-    FilterThreadPool(FilterThreadPool&&)                 = delete;
-    FilterThreadPool& operator=(const FilterThreadPool&) = delete;
-    FilterThreadPool& operator=(FilterThreadPool&&)      = delete;
-
-    ~FilterThreadPool() {
-        for (size_t i = 0; i < threads.size(); ++i) {
-            auto&                       mtx = *mtxes[i];
-            std::lock_guard<std::mutex> lk(mtx);
-            destructed[i] = true;
-        }
-        for (size_t i = 0; i < threads.size(); ++i) {
-            auto& cv = *cvs[i];
-            cv.notify_one();
-        }
-        for (size_t i = 0; i < threads.size(); ++i) {
-            threads[i].join();
-        }
-    }
-
-    void run(std::function<void(size_t, size_t)> function, size_t num_tasks) {
-        this->function  = std::move(function);
-        this->num_tasks = num_tasks;
-        for (size_t i = 0; i < threads.size(); ++i) {
-            auto&                       mtx = *mtxes[i];
-            std::lock_guard<std::mutex> lk(mtx);
-            has_function[i] = true;
-            finished[i]     = false;
-        }
-        for (size_t i = 0; i < threads.size(); ++i) {
-            auto& cv = *cvs[i];
-            cv.notify_one();
-        }
-        for (size_t i = 0; i < threads.size(); ++i) {
-            auto&                        mtx = *mtxes[i];
-            auto&                        cv  = *cvs[i];
-            std::unique_lock<std::mutex> lk(mtx);
-            cv.wait(lk, [this, i] { return finished[i]; });
-        }
+        for (auto& th : threads) th.join();
     }
 };
 

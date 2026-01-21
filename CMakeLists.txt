@@ -118,14 +118,12 @@ endif()
 
 # Targets
 add_executable(run ${SIGMODPC_SRC} tests/read_sql.cpp)
-add_executable(unit_tests ${SIGMODPC_SRC} tests/unit_tests.cpp)
 add_executable(build_database tests/build_database.cpp)
 
 # For all executables
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(run PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(build_database PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_definitions(unit_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -142,16 +140,25 @@ endif()
 target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
 target_compile_definitions(run PRIVATE TEAMOPT_USE_DUCKDB)
 target_link_libraries(build_database PRIVATE fmt duckdb)
-target_link_libraries(unit_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
 
 # -----------------------------
 # Software Tester
 # -----------------------------
-add_executable(software_tester ${SIGMODPC_SRC} tests/software_tester.cpp)
+add_executable(software_tester ${SIGMODPC_SRC} 
+    tests/software_tester.cpp
+    tests/software_tester/slab_allocator_tests.cpp
+    tests/software_tester/partitioned_build_tests.cpp
+    tests/software_tester/work_stealing_tests.cpp
+    tests/software_tester/bloom_filter_tests.cpp
+    tests/software_tester/late_materialization_tests.cpp
+    tests/software_tester/columnar_tests.cpp
+    tests/software_tester/zero_copy_int32_tests.cpp
+    tests/software_tester/hashtable_algorithms_tests.cpp
+    tests/software_tester/indexing_optimization_tests.cpp
+)
 target_link_libraries(software_tester PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
 target_compile_definitions(software_tester PRIVATE TEAMOPT_BUILD_CACHE)
 target_include_directories(software_tester PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
 
 target_include_directories(run PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
 target_include_directories(build_database PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
-target_include_directories(unit_tests PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)

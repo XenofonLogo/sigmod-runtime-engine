@@ -7,7 +7,11 @@
 #include <cstdio>
 #include <thread>
 #include "columnar.h"
-#include "hashtable_interface.h" 
+#include "hashtable_interface.h"
+#include "join_telemetry.h"
+#include "work_stealing.h"
+#include "join_config.h"
+#include "join_bloom_filter.h"
 
 // Hash Table Implementations:
 #include "unchained_hashtable_wrapper.h"  // Using PARALLEL unchained (fastest)
@@ -16,204 +20,21 @@
  //#include "hopscotch_wrapper.h" 
 namespace Contest {
 
-namespace {
-struct QueryTelemetry {
-    uint64_t joins = 0;
-    uint64_t build_rows = 0;
-    uint64_t probe_rows = 0;
-    uint64_t out_rows = 0;
-    uint64_t out_cells = 0;
-    uint64_t bytes_strict_min = 0; // keys + output writes
-    uint64_t bytes_likely = 0;     // + output reads (value_t)
-};
-
-static inline bool join_telemetry_enabled() {
-    // (GR) Προαιρετικά stats για να δούμε αν είμαστε memory-bandwidth bound.
-    // Default: ENABLED for performance. Set JOIN_TELEMETRY=0 to disable.
-    static const bool enabled = [] {
-        const char* v = std::getenv("JOIN_TELEMETRY");
-        if (!v) return true;  // Default to enabled
-        return *v && *v != '0';
-    }();
-    return enabled;
-}
-
-static inline bool auto_build_side_enabled() {
-    // Default: enabled. Set AUTO_BUILD_SIDE=0 to disable.
-    // (GR) Αυτόματο "optimizer-ish" heuristic: χτίζουμε hash table στη μικρότερη πλευρά.
-    static const bool enabled = [] {
-        const char* v = std::getenv("AUTO_BUILD_SIDE");
-        if (!v) return true;
-        return *v && *v != '0';
-    }();
-    return enabled;
-}
-
-static inline bool join_global_bloom_enabled() {
-    // Default: ENABLED for performance. Set JOIN_GLOBAL_BLOOM=0 to disable.
-    // (GR) Global bloom πριν το probe: μειώνει probes σε άσχετα keys.
-    // Χρήσιμο όταν probe πλευρά είναι τεράστια και το selectivity είναι μικρό.
-    static const bool enabled = [] {
-        const char* v = std::getenv("JOIN_GLOBAL_BLOOM");
-        if (!v || !*v) return true;  // Default: enabled
-        return *v != '0';
-    }();
-    return enabled;
-}
-
-static inline bool req_build_from_pages_enabled() {
-    // Default: enabled (meets assignment requirement for INT32 no-NULL columns).
-    // Set REQ_BUILD_FROM_PAGES=0 to force the old vector<HashEntry> build path.
-    static const bool enabled = [] {
-        const char* v = std::getenv("REQ_BUILD_FROM_PAGES");
-        if (!v) return true;
-        return *v && *v != '0';
-    }();
-    return enabled;
-}
-
-static inline uint32_t join_global_bloom_bits() {
-    // Default: 20 -> 1,048,576 bits (128 KiB).
-    // Clamp to a reasonable range so it doesn't blow up memory.
-    // (GR) Περισσότερα bits -> λιγότερα false positives αλλά περισσότερη μνήμη.
-    static const uint32_t bits = [] {
-        const char* v = std::getenv("JOIN_GLOBAL_BLOOM_BITS");
-        if (!v || !*v) return 20u;
-        const long parsed = std::strtol(v, nullptr, 10);
-        if (parsed < 16) return 16u;
-        if (parsed > 24) return 24u;
-        return static_cast<uint32_t>(parsed);
-    }();
-    return bits;
-}
-
-static std::atomic<uint64_t> g_query_seq{0};
-static thread_local QueryTelemetry g_qt;
-static thread_local uint64_t g_query_id = 0;
-
-static inline void qt_begin_query() {
-    g_query_id = ++g_query_seq;
-    g_qt = QueryTelemetry{};
-}
-
-static inline void qt_add_join(uint64_t build_rows,
-                               uint64_t probe_rows,
-                               uint64_t out_rows,
-                               uint64_t out_cols) {
-    g_qt.joins += 1;
-    g_qt.build_rows += build_rows;
-    g_qt.probe_rows += probe_rows;
-    g_qt.out_rows += out_rows;
-
-    const uint64_t out_cells = out_rows * out_cols;
-    g_qt.out_cells += out_cells;
-
-    const uint64_t bytes_keys = (build_rows + probe_rows) * 4ull;     // INT32 join keys
-    const uint64_t bytes_out_write = out_cells * 8ull;               // value_t writes (64-bit)
-    const uint64_t bytes_out_read = out_cells * 8ull;                // value_t reads (64-bit)
-
-    g_qt.bytes_strict_min += bytes_keys + bytes_out_write;
-    g_qt.bytes_likely += bytes_keys + bytes_out_read + bytes_out_write;
-}
-
-static inline void qt_end_query() {
-    const auto bytes_to_gib = [](uint64_t bytes) -> double {
-        return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
-    };
-    const auto ms_at_gbps = [](uint64_t bytes, double gb_per_s) -> double {
-        const double seconds = static_cast<double>(bytes) / (gb_per_s * 1e9);
-        return seconds * 1000.0;
-    };
-
-    // Bandwidth-only lower bounds (very optimistic for hash joins).
-    const double bw10 = 10.0;
-    const double bw20 = 20.0;
-    const double bw40 = 40.0;
-
-    std::fprintf(stderr,
-                 "[telemetry q%llu] joins=%llu build=%llu probe=%llu out=%llu out_cells=%llu\n",
-                 (unsigned long long)g_query_id,
-                 (unsigned long long)g_qt.joins,
-                 (unsigned long long)g_qt.build_rows,
-                 (unsigned long long)g_qt.probe_rows,
-                 (unsigned long long)g_qt.out_rows,
-                 (unsigned long long)g_qt.out_cells);
-
-    std::fprintf(stderr,
-                 "[telemetry q%llu] bytes_strict_min=%.3f GiB  bytes_likely=%.3f GiB\n",
-                 (unsigned long long)g_query_id,
-                 bytes_to_gib(g_qt.bytes_strict_min),
-                 bytes_to_gib(g_qt.bytes_likely));
-
-    std::fprintf(stderr,
-                 "[telemetry q%llu] BW LB strict: %.2f/%.2f/%.2f ms @ %.0f/%.0f/%.0f GB/s\n",
-                 (unsigned long long)g_query_id,
-                 ms_at_gbps(g_qt.bytes_strict_min, bw10),
-                 ms_at_gbps(g_qt.bytes_strict_min, bw20),
-                 ms_at_gbps(g_qt.bytes_strict_min, bw40),
-                 bw10, bw20, bw40);
-
-    std::fprintf(stderr,
-                 "[telemetry q%llu] BW LB likely: %.2f/%.2f/%.2f ms @ %.0f/%.0f/%.0f GB/s\n",
-                 (unsigned long long)g_query_id,
-                 ms_at_gbps(g_qt.bytes_likely, bw10),
-                 ms_at_gbps(g_qt.bytes_likely, bw20),
-                 ms_at_gbps(g_qt.bytes_likely, bw40),
-                 bw10, bw20, bw40);
-}
-} // namespace
-
 using ExecuteResult = ColumnBuffer;
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
 // JoinAlgorithm (INT32-only)
+// Handles build, probe, and result materialization phases
 struct JoinAlgorithm {
-    bool                                               build_left;
-    ExecuteResult&                                     left;      // build-side if build_left=true
-    ExecuteResult&                                     right;     // probe-side if build_left=true
-    ExecuteResult&                                     results;
-    size_t                                             left_col, right_col;
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs;
+    bool build_left;                                      // Which side to build hash table on
+    ExecuteResult& left;                                  // Left input
+    ExecuteResult& right;                                 // Right input
+    ExecuteResult& results;                               // Output buffer
+    size_t left_col, right_col;                          // Join column indices
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs;  // Output schema
 
     void run_int32() {
         using Key = int32_t;
-
-        struct GlobalBloom {
-            uint32_t bits = 0;
-            uint64_t mask = 0;
-            std::vector<uint64_t> words;
-
-            void init(uint32_t bits_) {
-                bits = bits_;
-                mask = (bits_ == 64) ? ~0ull : ((1ull << bits_) - 1ull);
-                const size_t nbits = 1ull << bits_;
-                const size_t nwords = (nbits + 63ull) / 64ull;
-                words.assign(nwords, 0ull);
-            }
-
-            static inline uint64_t hash32(uint32_t x) {
-                // Fast multiplicative hash; good enough for bloom indexing.
-                // (GR) Ο bloom δεν χρειάζεται κρυπτογραφική ποιότητα, μόνο γρήγορο mixing.
-                return static_cast<uint64_t>(x) * 11400714819323198485ull;
-            }
-
-            inline void add_i32(int32_t key) {
-                const uint64_t h = hash32(static_cast<uint32_t>(key));
-                const uint64_t i1 = (h)&mask;
-                const uint64_t i2 = (h >> 32)&mask;
-                words[i1 >> 6] |= (1ull << (i1 & 63ull));
-                words[i2 >> 6] |= (1ull << (i2 & 63ull));
-            }
-
-            inline bool maybe_contains_i32(int32_t key) const {
-                const uint64_t h = hash32(static_cast<uint32_t>(key));
-                const uint64_t i1 = (h)&mask;
-                const uint64_t i2 = (h >> 32)&mask;
-                const uint64_t w1 = words[i1 >> 6];
-                const uint64_t w2 = words[i2 >> 6];
-                return (w1 & (1ull << (i1 & 63ull))) && (w2 & (1ull << (i2 & 63ull)));
-            }
-        };
 
         const ColumnBuffer* build_buf = build_left ? &left : &right;
         const ColumnBuffer* probe_buf = build_left ? &right : &left;
@@ -226,13 +47,10 @@ struct JoinAlgorithm {
 
         GlobalBloom bloom;
         const bool use_global_bloom = join_global_bloom_enabled();
+        // BUILD PHASE: optional global bloom init for early reject
         if (use_global_bloom) bloom.init(join_global_bloom_bits());
 
-        // -----------------------------------------------------------------
-        // Build side: prefer building directly from the input INT32 pages
-        // (no NULLs) to avoid copying/materializing the column.
-        // Toggle: REQ_BUILD_FROM_PAGES=0 disables this.
-        // -----------------------------------------------------------------
+        // BUILD PHASE: prefer zero-copy INT32 pages (no NULLs); toggle via REQ_BUILD_FROM_PAGES
         const bool can_build_from_pages = req_build_from_pages_enabled() &&
                                           build_col.is_zero_copy && build_col.src_column != nullptr &&
                                           build_col.page_offsets.size() >= 2;
@@ -309,20 +127,21 @@ struct JoinAlgorithm {
         const size_t nthreads = (probe_n >= (1u << 18)) ? hw : 1;
         std::vector<std::vector<OutPair>> out_by_thread(nthreads);
 
-        // Work stealing with atomic counter for dynamic load balancing
-        std::atomic<size_t> work_counter{0};
-        const size_t work_block_size = std::max(size_t(256), probe_n / (nthreads * 16)); // balanced block size for load stealing
+        // PROBE PHASE: work stealing with atomic counter for dynamic load balancing
+        WorkStealingConfig ws_config{
+            .total_work = probe_n,
+            .num_threads = nthreads,
+            .min_block_size = 256,
+            .blocks_per_thread = 16
+        };
+        WorkStealingCoordinator ws_coordinator(ws_config);
 
         auto probe_range_with_stealing = [&](size_t tid) {
             auto &local = out_by_thread[tid];
             local.reserve(probe_n / nthreads + 256);
 
-            while (true) {
-                // Try to steal a block of work
-                size_t begin_j = work_counter.fetch_add(work_block_size, std::memory_order_acquire);
-                if (begin_j >= probe_n) break;
-                
-                size_t end_j = std::min(probe_n, begin_j + work_block_size);
+            size_t begin_j, end_j;
+            while (ws_coordinator.steal_block(begin_j, end_j)) {
 
                 const auto &probe_col = probe_buf->columns[probe_key_col];
 
@@ -418,11 +237,11 @@ struct JoinAlgorithm {
         // (total_out rows) και γράφουμε με άμεσο indexing αντί για append() σε value_t.
         const size_t num_output_cols = output_attrs.size();
 
-        if (join_telemetry_enabled()) {
-            qt_add_join(static_cast<uint64_t>(build_rows_effective),
-                        static_cast<uint64_t>(probe_n),
-                        static_cast<uint64_t>(total_out),
-                        static_cast<uint64_t>(num_output_cols));
+        if (Contest::join_telemetry_enabled()) {
+            Contest::qt_add_join(static_cast<uint64_t>(build_rows_effective),
+                                 static_cast<uint64_t>(probe_n),
+                                 static_cast<uint64_t>(total_out),
+                                 static_cast<uint64_t>(num_output_cols));
         }
 
         struct OutputMap {
@@ -459,9 +278,8 @@ struct JoinAlgorithm {
 
         // All columns use the same page size (ColumnBuffer constructs them with 1024).
         const size_t out_page_sz = results.columns.empty() ? 1024 : results.columns[0].values_per_page;
-        // For very large outputs, materialization can dominate; do it in parallel.
-        // (GR) Όταν το αποτέλεσμα είναι τεράστιο, το copy των value_t κυριαρχεί -> parallel fill.
-        const bool parallel_materialize = (nthreads > 1) && (total_out >= (1u << 20));
+        // RESULT MATERIALIZATION: single-threaded per assignment requirement.
+        const bool parallel_materialize = false;
 
         if (!parallel_materialize) {
             size_t out_idx = 0;
@@ -534,15 +352,8 @@ ExecuteResult execute_hash_join(const Plan&                plan,
     auto left  = execute_impl(plan, left_idx);
     auto right = execute_impl(plan, right_idx);
 
-    // Optimizer-ish: prefer building the hash table on the smaller side.
-    // Only override the plan hint when there is a clear size win.
+    // Use plan-specified build side (from query planner)
     bool effective_build_left = join.build_left;
-    if (auto_build_side_enabled()) {
-        const size_t l = left.num_rows;
-        const size_t r = right.num_rows;
-        if (l * 10ull <= r * 9ull) effective_build_left = true;
-        else if (r * 10ull <= l * 9ull) effective_build_left = false;
-    }
 
     // prepare output ColumnBuffer
     ColumnBuffer results(output_attrs.size(), 0);
@@ -599,10 +410,10 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 
 ColumnarTable execute(const Plan& plan, void* context) {
     (void)context;
-    if (join_telemetry_enabled()) qt_begin_query();
+    if (Contest::join_telemetry_enabled()) Contest::qt_begin_query();
     auto buf = execute_impl(plan, plan.root);
-    if (join_telemetry_enabled()) qt_end_query();
-    return finalize_columnbuffer_to_columnar(
+    if (Contest::join_telemetry_enabled()) Contest::qt_end_query();
+    return Contest::finalize_columnbuffer_to_columnar(
         plan, buf, plan.nodes[plan.root].output_attrs
     );
 }

@@ -74,14 +74,10 @@
 └────────────┬───────────────────────────────────────────────────────┘
              ↓
 ┌────────────────────────────────────────────────────────────────────┐
-│ 2. AUTO BUILD-SIDE SELECTION                                       │
+│ 2. BUILD-SIDE AS PLANNED                                          │
 │                                                                    │
-│    if (left.num_rows * 10 <= right.num_rows * 9):               │
-│        effective_build_left = true                               │
-│    else:                                                          │
-│        effective_build_left = false                              │
-│                                                                    │
-│    (Override plan hint with optimizer's choice)                  │
+│    effective_build_left = join.build_left (from planner)        │
+│    // no runtime auto-switching                                  │
 └────────────┬───────────────────────────────────────────────────────┘
              ↓
 ┌────────────────────────────────────────────────────────────────────┐
@@ -100,7 +96,7 @@
 ┌────────────────────────────────────────────────────────────────────┐
 │ 4. CALL HASH JOIN: ja.run_int32()                                  │
 │                                                                    │
-│    This is THE CORE ALGORITHM                                   │
+│    This is THE CORE ALGORITHM (INT32 keys only)                 │
 └────────────┬───────────────────────────────────────────────────────┘
              ↓
               ╔═══════════════════════════════════════════════════════╗
@@ -115,7 +111,8 @@
 │                                                                    │
 │    ColumnBuffer with:                                            │
 │    - num_rows: total matching rows                              │
-│    - columns: late-materialized output columns only             │
+│    - columns: late-materialized output columns only (single-    │
+│      threaded materialization)                                  │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -282,28 +279,24 @@
     └────┬─────────────────────────────────────────────────┘
          ↓
     ┌──────────────────────────────────────────────────────┐
-    │ MATERIALIZE COLUMNS                                  │
-    │                                                      │
-    │ Determine parallelization:                          │
-    │ parallel_materialize = (nthreads > 1) &&           │
-    │                       (total_out >= 2^20)          │
-    │                                                      │
-    │ ├─ IF SEQUENTIAL (most IMDB queries):              │
-    │ │  For each match (lidx, ridx):                    │
-    │ │    out_idx = running counter                     │
-    │ │    page_idx = out_idx / page_size                │
-    │ │    off = out_idx % page_size                     │
-    │ │                                                   │
-    │ │    For each output column:                       │
-    │ │      value = left[col][lidx] or right[col][ridx]│
-    │ │      results[col][page_idx][off] = value        │
-    │ │                                                   │
-    │ │  Time: 0.3 ms                                    │
-    │ │                                                   │
-    │ └─ ELSE PARALLEL (for huge outputs):               │
-    │    Split output among threads                      │
-    │    Each thread fills its range                     │
-    │    With per-column caches for page indices         │
+     │ MATERIALIZE COLUMNS                                  │
+     │                                                      │
+     │ parallel_materialize = false (hard-disabled)        │
+     │                                                      │
+     │ ├─ SEQUENTIAL (current behavior):                  │
+     │ │  For each match (lidx, ridx):                    │
+     │ │    out_idx = running counter                     │
+     │ │    page_idx = out_idx / page_size                │
+     │ │    off = out_idx % page_size                     │
+     │ │                                                   │
+     │ │    For each output column:                       │
+     │ │      value = left[col][lidx] or right[col][ridx]│
+     │ │      results[col][page_idx][off] = value        │
+     │ │                                                   │
+     │ │  Time: ~0.3 ms (illustrative)                    │
+     │ │                                                   │
+     │ └─ PARALLEL (not used now):                        │
+     │    Disabled in code (kept for documentation only)  │
     │                                                      │
     └────┬──────────────────────────────────────────────────┘
          ↓
@@ -318,16 +311,16 @@
     └────┬───────────────────────────────────────────┘
          ↓
     ┌──────────────────────────────────────────────┐
-    │ TOTAL TIME SUMMARY                           │
-    │                                              │
-    │ Build hashtable:     0.22 ms                │
-    │ Probe hashtable:     1.6 ms                 │
-    │ Late materialize:    0.3 ms                 │
-    │ ─────────────────────────                   │
-    │ Total per join:      ~2.1 ms                │
-    │                                              │
-    │ For 113 queries × avg joins/query:          │
-    │ 9.66 seconds ✅                             │
+│ TOTAL TIME SUMMARY (example measurement)    │
+│                                              │
+│ Build hashtable:     ~0.22 ms               │
+│ Probe hashtable:     ~1.6 ms                │
+│ Late materialize:    ~0.3 ms                │
+│ ─────────────────────────                   │
+│ Total per join:      ~2.1 ms                │
+│                                              │
+│ For 113 queries × avg joins/query:          │
+│ ~9.66 seconds (example)                     │
     └──────────────────────────────────────────────┘
 ```
 
@@ -420,8 +413,8 @@
 ┌────────────────────────────────────────────────────┐
 │        GLOBAL BLOOM FILTER STRUCTURE               │
 │                                                    │
-│ Size: 2^20 bits = 128 KiB                         │
-│ Storage: std::vector<uint64_t> (16K words)        │
+│ Size: 2^N bits (configurable via join_global_bloom_bits())  │
+│ Storage: std::vector<uint64_t>                    │
 │                                                    │
 │ ┌─────────────────────────────────────────┐       │
 │ │ Word[0]:  64 bits                       │       │
@@ -436,8 +429,9 @@
 │                                                       │
 │ For each BUILD key:                                  │
 │   h = hash32(key)  ← Fibonacci hash                  │
-│   i1 = h & mask          ← 20-bit hash value        │
-│   i2 = (h >> 32) & mask  ← Different 20-bit value   │
+│   mask = (1u << join_global_bloom_bits()) - 1        │
+│   i1 = h & mask                                     │
+│   i2 = (h >> 32) & mask                             │
 │                                                       │
 │   words[i1 >> 6] |= (1 << (i1 & 63))  ← Set bit 1  │
 │   words[i2 >> 6] |= (1 << (i2 & 63))  ← Set bit 2  │
@@ -450,6 +444,7 @@
 │                                                       │
 │ For each PROBE key:                                  │
 │   h = hash32(key)                                    │
+│   mask = (1u << join_global_bloom_bits()) - 1        │
 │   i1 = h & mask                                      │
 │   i2 = (h >> 32) & mask                              │
 │                                                       │
@@ -467,11 +462,11 @@
 │                                                       │
 │ Example: 10M probe rows, 1M build rows              │
 │                                                       │
-│ False positive rate: (1 - (1 - 1/2^20)^(2M))^2     │
-│                    ≈ 0.05 (5%)                      │
+│ False positive rate (illustrative, N=20 bits):     │
+│ (1 - (1 - 1/2^20)^(2M))^2 ≈ 5%                     │
 │                                                       │
-│ Rejected by bloom: 10M × 0.95 = 9.5M               │
-│ Avoided probes: 9.5M hash table lookups!           │
+│ Rejected by bloom (example): 10M × 0.95 = 9.5M     │
+│ Avoided probes (example): 9.5M hash table lookups  │
 │                                                       │
 │ Benefit: O(1) rejection vs O(1) hash table probe   │
 │ → 20-100x speedup for non-matching keys!           │
