@@ -130,6 +130,13 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_executable(build_cache ${SIGMODPC_SRC} tests/read_sql.cpp)
     add_executable(fast ${SIGMODPC_SRC} tests/read_sql.cpp)
 
+    # --- ΠΡΟΣΘΗΚΗ ΓΙΑ ΤΟ LEADERBOARD ---
+    # Δημιουργία του executable 'leaderboard' ως ακριβές αντίγραφο του 'fast'
+    add_executable(leaderboard ${SIGMODPC_SRC} tests/read_sql.cpp)
+    target_link_libraries(leaderboard PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser)
+    target_include_directories(leaderboard PRIVATE include ${hopscotch_map_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/include)
+    # -----------------------------------
+
     target_link_libraries(build_cache PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
     target_compile_definitions(build_cache PRIVATE TEAMOPT_USE_DUCKDB TEAMOPT_BUILD_CACHE)
     target_link_libraries(fast PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser)
