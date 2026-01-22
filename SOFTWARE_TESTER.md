@@ -12,7 +12,7 @@
 ### Build
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target software_tester -- -j 8
+cmake --build build --target software_tester -- -j 
 ```
 
 ### Εκτέλεση Όλων των Tests

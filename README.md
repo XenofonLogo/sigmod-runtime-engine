@@ -357,6 +357,5 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 - `PARADOTEO_3.md` - Parallel execution & zero-copy
 - `ADDITIONAL_IMPLEMENTATIONS.md` - OPTIMIZED optimizations
 - `MEASUREMENTS.md` - Performance measurements
-- `ODIGIES_EKTELESHS.md` - Quick execution guide
 
 Δείτε τα σχετικά `.md` αρχεία για πλήρες τεχνικό background.

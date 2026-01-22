@@ -4,7 +4,6 @@
 #include "plan.h"
 #include "table.h"
 #include "columnar.h"
-#include "join_bloom_filter.h"
 
 // ============================================================================
 // STRICT INTEGRATION TESTS
@@ -94,62 +93,8 @@ TEST_CASE("ColumnarTable: cached page index optimization", "[columnar][cache]") 
     REQUIRE(col.cached_page_idx >= 0);
 }
 
-TEST_CASE("GlobalBloom: basic add and contains", "[bloom][filter]") {
-    GlobalBloom bloom;
-    bloom.init(20); // 2^20 bits
-    
-    // Add some INT32 keys
-    bloom.add_i32(100);
-    bloom.add_i32(200);
-    bloom.add_i32(300);
-    
-    // Check contains
-    REQUIRE(bloom.maybe_contains_i32(100));
-    REQUIRE(bloom.maybe_contains_i32(200));
-    REQUIRE(bloom.maybe_contains_i32(300));
-}
-
-TEST_CASE("GlobalBloom: false positive rate", "[bloom][false-positive]") {
-    GlobalBloom bloom;
-    bloom.init(18); // 2^18 bits
-    
-    // Add 1000 keys
-    for (int i = 0; i < 1000; ++i) {
-        bloom.add_i32(i);
-    }
-    
-    // Check for keys that were NOT added
-    int false_positives = 0;
-    int checks = 1000;
-    for (int i = 10000; i < 10000 + checks; ++i) {
-        if (bloom.maybe_contains_i32(i)) {
-            false_positives++;
-        }
-    }
-    
-    // False positive rate should be low (< 10% for reasonable bloom filter)
-    double fp_rate = static_cast<double>(false_positives) / checks;
-    REQUIRE(fp_rate < 0.10);
-}
-
-TEST_CASE("GlobalBloom: hash independence", "[bloom][hash]") {
-    GlobalBloom bloom;
-    bloom.init(16);
-    
-    bloom.add_i32(42);
-    
-    // Similar values should not all be positive (hash independence)
-    REQUIRE(bloom.maybe_contains_i32(42));
-    
-    // Check that nearby values aren't all present (would indicate poor hashing)
-    int nearby_hits = 0;
-    for (int i = 43; i < 53; ++i) {
-        if (bloom.maybe_contains_i32(i)) nearby_hits++;
-    }
-    
-    // Shouldn't have all nearby values present
-    REQUIRE(nearby_hits < 10);
-}
+// GlobalBloom tests removed - GlobalBloom was deleted from codebase
+// Directory-embedded bloom filters (16-bit per bucket) are used instead
 
 TEST_CASE("value_t: INT32 operations", "[value][int32]") {
     auto v = value_t::make_i32(42);
