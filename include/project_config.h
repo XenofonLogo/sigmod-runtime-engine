@@ -40,12 +40,12 @@ inline bool is_optimized_mode() {
     return v && *v && *v != '0';
 }
 
-// Default: OPTIMIZED_PROJECT=1 (unless STRICT_PROJECT=1 is explicitly set)
-inline bool is_optimized_mode() {
-    // If STRICT_PROJECT is explicitly on, use it
-    if (is_strict_mode()) return false;
-    // Otherwise default to OPTIMIZED (fast single-pass)
-    return true;
+// Default: STRICT_PROJECT=1 (unless OPTIMIZED_PROJECT=1 is explicitly set)
+inline bool use_strict_project() {
+    // If OPTIMIZED is explicitly on, use it
+    if (is_strict_mode()) return true;
+    // Otherwise default to STRICT (partition build)
+    return false;
 }
 
 } // namespace Contest
