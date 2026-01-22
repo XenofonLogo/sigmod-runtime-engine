@@ -303,7 +303,7 @@ Thread-local → Global L1 Cache → Global L2 Pool
    - Οι hash functions δίνουν independent bit positions
 
 9. **Global bloom configuration**
-   - Ανάγνωση `JOIN_GLOBAL_BLOOM_BITS` env variable
+   - Σταθερό μέγεθος bloom: `bloom.init(4)` (χωρίς env), δύο θέσεις ανά key
 
 #### Tests (GlobalBloom - indexing_optimization_tests.cpp)
 
@@ -317,7 +317,7 @@ Thread-local → Global L1 Cache → Global L2 Pool
     - Κοντινές τιμές δεν είναι όλες present (καλό hashing)
 
 13. **JoinConfig: bloom filter configuration**
-    - Έλεγχος `join_global_bloom_enabled()` και `join_global_bloom_bits()`
+   - Δεν υπάρχουν πλέον config functions για global bloom. Η υλοποίηση είναι σταθερή.
 
 ---
 
@@ -478,8 +478,8 @@ Column-store: [id, id, id...][name, name...][age, age...]
 9. **ZeroCopyInt32: multi-column zero-copy** (repeat)
    - Stress test με πολλές στήλες
 
-10. **JoinConfig: build from pages enabled** (στο indexing_optimization_tests.cpp)
-    - `req_build_from_pages_enabled()` flag check
+10. **Zero-copy page build detection** (στο indexing_optimization_tests.cpp)
+   - Αυτόματη ανίχνευση: `is_zero_copy && src_column != nullptr && page_offsets.size() >= 2`
 
 ---
 
@@ -533,12 +533,11 @@ Column-store: [id, id, id...][name, name...][age, age...]
    - `plan.new_join_node(build_left, left, right, left_attr, right_attr, output_attrs)`
    - Δημιουργία join tree: scan + scan → join
 
-3. **JoinConfig: build from pages enabled**
-   - `req_build_from_pages_enabled()` - flag για zero-copy build
+3. **Zero-copy page build detection**
+   - Αυτόματη ανίχνευση χωρίς flags
 
-4. **JoinConfig: bloom filter configuration**
-   - `join_global_bloom_enabled()`, `join_global_bloom_bits()`
-   - Επαλήθευση: bits ∈ [10, 30]
+4. **Global bloom behavior**
+   - Σταθερό μέγεθος με `init(4)` — δεν υπάρχει παραμετροποίηση bits
 
 ---
 
@@ -613,13 +612,13 @@ tests/
 - Tags για filtering: `[hashtable]`, `[bloom]`, `[zero-copy]`, etc.
 - Reporters: `compact`, `console`, `junit`
 
-### Environment Variables
+### Modes
 ```bash
-# Enable/configure global bloom filter
-export JOIN_GLOBAL_BLOOM_BITS=22  # 2^22 bits = 4MB bloom filter
+# STRICT mode (requires algorithmic compliance; uses partitioned build automatically)
+STRICT_PROJECT=1 ./build/fast plans.json
 
-# Enable zero-copy build from pages
-export REQ_BUILD_FROM_PAGES=1
+# OPTIMIZED mode (fast path)
+OPTIMIZED_PROJECT=1 ./build/fast plans.json
 ```
 
 ---
@@ -651,15 +650,9 @@ export REQ_BUILD_FROM_PAGES=1
 # Build σε Release mode
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-# Benchmark με διαφορετικά bloom bits
-for bits in 18 20 22 24; do
-    echo "Testing with JOIN_GLOBAL_BLOOM_BITS=$bits"
-    JOIN_GLOBAL_BLOOM_BITS=$bits ./build/fast plans.json
-done
-
-# Benchmark zero-copy on/off
-REQ_BUILD_FROM_PAGES=0 ./build/fast plans.json  # Without zero-copy
-REQ_BUILD_FROM_PAGES=1 ./build/fast plans.json  # With zero-copy
+# Modes benchmarking
+STRICT_PROJECT=1 ./build/fast plans.json
+OPTIMIZED_PROJECT=1 ./build/fast plans.json
 ```
 
 ---

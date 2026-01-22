@@ -10,8 +10,7 @@
 #include "hashtable_interface.h"
 #include "join_telemetry.h"
 #include "work_stealing.h"
-#include "join_config.h"
-#include "join_bloom_filter.h"
+#include "project_config.h"
 
 // Hash Table Implementations:
 #include "unchained_hashtable_wrapper.h"  // Using PARALLEL unchained (fastest)
@@ -45,34 +44,14 @@ struct JoinAlgorithm {
 
         const auto &build_col = build_buf->columns[build_key_col];
 
-        GlobalBloom bloom;
-        const bool use_global_bloom = join_global_bloom_enabled();
-        // BUILD PHASE: optional global bloom init for early reject
-        if (use_global_bloom) bloom.init(join_global_bloom_bits());
-
-        // BUILD PHASE: prefer zero-copy INT32 pages (no NULLs); toggle via REQ_BUILD_FROM_PAGES
-        const bool can_build_from_pages = req_build_from_pages_enabled() &&
-                                          build_col.is_zero_copy && build_col.src_column != nullptr &&
+        // BUILD PHASE: prefer zero-copy INT32 pages (no NULLs)
+        const bool can_build_from_pages = build_col.is_zero_copy && build_col.src_column != nullptr &&
                                           build_col.page_offsets.size() >= 2;
 
         std::vector<HashEntry<Key>> entries;
         size_t build_rows_effective = 0;
 
         if (can_build_from_pages) {
-            // Build bloom from pages (still needed for early reject in probe).
-            if (use_global_bloom) {
-                const auto &offs = build_col.page_offsets;
-                const size_t npages = offs.size() - 1;
-                for (size_t page_idx = 0; page_idx < npages; ++page_idx) {
-                    const size_t base = offs[page_idx];
-                    const size_t end = offs[page_idx + 1];
-                    const size_t n = end - base;
-                    auto *page = build_col.src_column->pages[page_idx]->data;
-                    auto *data = reinterpret_cast<const int32_t *>(page + 4);
-                    for (size_t slot = 0; slot < n; ++slot) bloom.add_i32(data[slot]);
-                }
-            }
-
             const bool built = table->build_from_zero_copy_int32(build_col.src_column,
                                                                 build_col.page_offsets,
                                                                 build_buf->num_rows);
@@ -86,11 +65,6 @@ struct JoinAlgorithm {
                     }
                 }
                 if (entries.empty()) return;
-                if (use_global_bloom) {
-                    // Rebuild bloom from entries for correctness.
-                    bloom.init(join_global_bloom_bits());
-                    for (const auto &e : entries) bloom.add_i32(e.key);
-                }
                 table->reserve(entries.size());
                 table->build_from_entries(entries);
                 build_rows_effective = entries.size();
@@ -103,7 +77,6 @@ struct JoinAlgorithm {
                 const value_t &v = build_col.pages[i / build_col.values_per_page][i % build_col.values_per_page];
                 if (!v.is_null()) {
                     entries.push_back(HashEntry<Key>{v.as_i32(), static_cast<uint32_t>(i)});
-                    if (use_global_bloom) bloom.add_i32(v.as_i32());
                 }
             }
 
@@ -176,8 +149,6 @@ struct JoinAlgorithm {
 
                         const int32_t probe_key = data[j - base];
 
-                        if (use_global_bloom && !bloom.maybe_contains_i32(probe_key)) continue;
-
                         size_t len = 0;
                         const auto *bucket = table->probe(probe_key, len);
                         if (!bucket || len == 0) continue;
@@ -197,8 +168,6 @@ struct JoinAlgorithm {
                         const value_t &v = probe_col.pages[j / probe_col.values_per_page][j % probe_col.values_per_page];
                         if (v.is_null()) continue;
                         const int32_t probe_key = v.as_i32();
-
-                        if (use_global_bloom && !bloom.maybe_contains_i32(probe_key)) continue;
 
                         size_t len = 0;
                         const auto *bucket = table->probe(probe_key, len);

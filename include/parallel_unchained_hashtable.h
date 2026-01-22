@@ -15,6 +15,7 @@
 #include "three_level_slab.h"
 #include "temp_allocator.h"
 #include "partition_hash_builder.h"
+#include "project_config.h"
 
 /*
  * TupleEntry:
@@ -134,7 +135,8 @@ public:
      * 5. Bloom: Ενημέρωση bloom filters
      */
     void build_from_entries(const std::vector<Contest::HashEntry<Key>>& entries) {
-        if (required_partition_build_enabled() &&
+        // Mode selection: STRICT uses partition build, OPTIMIZED uses simple build
+        if (Contest::use_strict_project() &&
             entries.size() >= required_partition_build_min_rows()) {
             build_from_entries_partitioned_parallel(entries);
             return;
@@ -221,7 +223,8 @@ public:
     void build_from_zero_copy_int32(const Column* src_column,
                                     const std::vector<std::size_t>& page_offsets,
                                     std::size_t num_rows) {
-        if (required_partition_build_enabled() &&
+        // Mode selection: STRICT uses partition build, OPTIMIZED uses simple build
+        if (Contest::use_strict_project() &&
             num_rows >= required_partition_build_min_rows()) {
             build_from_zero_copy_int32_partitioned_parallel(src_column, page_offsets, num_rows);
             return;
@@ -331,27 +334,9 @@ public:
         return &tuples_[begin];
     }
 
-    static bool required_partition_build_enabled() {
-        // Default: enabled to satisfy the assignment. Set REQ_PARTITION_BUILD=0 to disable.
-        static const bool enabled = [] {
-            const char* v = std::getenv("REQ_PARTITION_BUILD");
-        
-            return v && *v && *v != '0';
-        }();
-        return enabled;
-    }
-
     static std::size_t required_partition_build_min_rows() {
-        // Optional threshold to avoid overhead on tiny builds.
-        // Default: 0 (always use required algorithm when enabled).
-        static const std::size_t min_rows = [] {
-            const char* v = std::getenv("REQ_PARTITION_BUILD_MIN_ROWS");
-            if (!v || !*v) return std::size_t(0);
-            const long parsed = std::strtol(v, nullptr, 10);
-            if (parsed < 0) return std::size_t(0);
-            return static_cast<std::size_t>(parsed);
-        }();
-        return min_rows;
+        // Env vars not used anymore; always apply required algorithm when STRICT.
+        return std::size_t(0);
     }
 
     using TmpEntry = Contest::TmpEntry<Key>;
@@ -593,25 +578,7 @@ public:
         for (auto& th : threads) th.join();
     }
 
-    /*
-     * probe_exact():
-     * Helper για exact key matching
-     */
-    std::vector<std::size_t> probe_exact(const Key& key) const {
-        std::size_t len;
-        const entry_type* base = probe(key, len);
-
-        std::vector<std::size_t> result;
-        if (!base) return result;
-
-        for (std::size_t i = 0; i < len; ++i) {
-            if (base[i].key == key) {
-                result.push_back(base[i].row_id);
-            }
-        }
-
-        return result;
-    }
+    // Removed unused probe_exact() helper (not referenced anywhere)
 
     std::size_t size() const { return tuples_.size(); }
     

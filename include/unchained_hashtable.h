@@ -306,23 +306,7 @@ public:
         return (len == 0) ? nullptr : &tuples_[d.begin_idx];
     }
 
-    /*
-     * probe_exact():
-     * Εκτελεί πλήρη σύγκριση για να επιστρέψει μόνο τα tuples με ίδιο key.
-     */
-    std::vector<std::size_t> probe_exact(const Key& key) const {
-        std::size_t len;
-        const entry_type* base = probe(key, len);
-
-        std::vector<std::size_t> result;
-        if (!base) return result;
-
-        for (std::size_t i = 0; i < len; ++i)
-            if (base[i].key == key)
-                result.push_back(base[i].row_id);
-
-        return result;
-    }
+    // Removed unused probe_exact() helper (not referenced anywhere)
 
     std::size_t size() const { return tuples_.size(); }
 

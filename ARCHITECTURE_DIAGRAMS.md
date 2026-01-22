@@ -132,8 +132,7 @@
     ┌────────────────────────────────────────────────────────────┐
     │ Check if zero-copy possible:                               │
     │                                                            │
-    │ can_build_from_pages = req_build_from_pages_enabled() &&  │
-    │                        build_col.is_zero_copy &&          │
+     │ can_build_from_pages = build_col.is_zero_copy &&          │
     │                        build_col.src_column != nullptr &&  │
     │                        build_col.page_offsets.size() >= 2  │
     └────┬──────────────────────────────────────────────────────┘
@@ -191,16 +190,15 @@
     └────┬────────────────────────────────────────────────┘
          ↓
     ┌─────────────────────────────────────┐
-    │ CREATE GLOBAL BLOOM                 │
-    │                                     │
-    │ if (use_global_bloom):              │
-    │   bloom.init(join_global_bloom_bits)│
-    │   For each build key:               │
-    │     bloom.add_i32(key)              │
-    │                                     │
-    │ Size: 128 KiB (2^20 bits)           │
+     │ CREATE GLOBAL BLOOM                 │
+     │                                     │
+     │ bloom.init(4)                       │
+     │ For each build key:                 │
+     │   bloom.add_i32(key)                │
+     │                                     │
+     │ Size: fixed (2^4 bits)              │
     │ Hash: Dual (2 hash functions)       │
-    │ Rejection: ~95% false positives     │
+     │ Rejection: false positives possible │
     └────┬────────────────────────────────┘
          ↓
     ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
@@ -413,7 +411,7 @@
 ┌────────────────────────────────────────────────────┐
 │        GLOBAL BLOOM FILTER STRUCTURE               │
 │                                                    │
-│ Size: 2^N bits (configurable via join_global_bloom_bits())  │
+│ Size: 2^4 bits (fixed)                                       │
 │ Storage: std::vector<uint64_t>                    │
 │                                                    │
 │ ┌─────────────────────────────────────────┐       │
@@ -429,7 +427,7 @@
 │                                                       │
 │ For each BUILD key:                                  │
 │   h = hash32(key)  ← Fibonacci hash                  │
-│   mask = (1u << join_global_bloom_bits()) - 1        │
+│   mask = (1u << 4) - 1                                │
 │   i1 = h & mask                                     │
 │   i2 = (h >> 32) & mask                             │
 │                                                       │
@@ -444,7 +442,7 @@
 │                                                       │
 │ For each PROBE key:                                  │
 │   h = hash32(key)                                    │
-│   mask = (1u << join_global_bloom_bits()) - 1        │
+│   mask = (1u << 4) - 1                                │
 │   i1 = h & mask                                      │
 │   i2 = (h >> 32) & mask                              │
 │                                                       │

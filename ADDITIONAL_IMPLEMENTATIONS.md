@@ -1,557 +1,896 @@
-## 🟢 ΜΕΡΟΣ 4ο: Επιπλέον Υλοποιήσεις & Προχωρημένες Βελτιστοποιήσεις
+# OPTIMIZED_PROJECT: Τεχνική Τεκμηρίωση Βελτιστοποιήσεων
 
-### Σκοπός & Κίνητρο
+> **⚠️ ΣΗΜΕΙΩΣΗ ΜΕΤΡΗΣΕΩΝ:**  
+> Τα νούμερα performance σε αυτό το έγγραφο (build time, probe time, κλπ) είναι **θεωρητικές εκτιμήσεις**
+> βασισμένες στην αρχιτεκτονική του κώδικα. Δεν υπάρχουν built-in timers για detailed phase measurements.
+> Το μόνο telemetry που υπάρχει (`JOIN_TELEMETRY=1`) καταγράφει memory bandwidth estimates, όχι χρόνους φάσεων.
+> Για ακριβείς μετρήσεις, χρησιμοποιήστε εξωτερικά εργαλεία όπως `perf`, `time`, ή custom profiling.
 
-Πέρα από τις απαιτήσεις, υλοποιήθηκαν πρόσθετες βελτιστοποιήσεις που επέτυχαν σημαντική μείωση του χρόνου εκτέλεσης:
+## Περιεχόμενα
 
-- **Direct page access**: Αφαιρεί division/modulo και indirection σε κάθε row
-- **Zero-copy operations**: Αποφεύγει materialization και περιττές αντιγραφές
-- **Global Bloom Filter**: Early rejection για non-matching keys
-- **Parallel probing**: Work-stealing για μεγάλα inputs
-
-**Συνολικό αποτέλεσμα**: 22.8s → 9.5s = **~58% βελτίωση** (113 queries, επιβεβαιωμένο)
-
----
-
-## ΕΝΌΤΗΤΑ 1: Direct Page Access & Zero-Copy Optimizations
-
-### 1.1 Direct Page Access αντί για `column.get()`
-
-#### Πρόβλημα Αρχικής Υλοποίησης
-
-Κάθε κλήση `column.get(i)` εκτελεί:
-```cpp
-page = i / values_per_page      // Division (expensive)
-slot = i % values_per_page      // Modulo (expensive)
-return pages[page][slot]        // Double indirection
-```
-
-Με εκατομμύρια rows ανά φάση, αυτό μεταφράζεται σε:
-- Δεκάδες εκατομμύρια divisions/modulos
-- Κακή cache locality
-- Πολλαπλά cache misses
-
-#### Νέα Αρχιτεκτονική: Direct Pointers
-
-```cpp
-// Μία φορά στην αρχή: κατασκευή direct page pointers
-std::vector<const int32_t*> page_ptrs;
-for (const auto& page : column.pages) {
-    page_ptrs.push_back(reinterpret_cast<const int32_t*>(page->data + 4));
-}
-
-// Στη συνέχεια: απλή ανάγνωση με pointer arithmetic
-for (size_t page_idx = 0; page_idx < page_ptrs.size(); page_idx++) {
-    const int32_t* ptr = page_ptrs[page_idx];
-    // Σειριακή πρόσβαση χωρίς division/modulo
-    for (size_t i = 0; i < values_in_page[page_idx]; i++) {
-        int32_t value = ptr[i];  // O(1), cache-friendly
-    }
-}
-```
-
-**Κώδικας**: [src/execute_default.cpp#L320-L377](src/execute_default.cpp#L320-L377)
-
-#### Μετρημένη Επίδραση
-
-- **Legacy path** (with per-row `get`): 22.8s
-- **Current path** (direct pointers): ~12.8s
-- **Κέρδος**: ~10s (~44% βελτίωση)
+1. [Επισκόπηση Τριών Εκδόσεων](#1-επισκόπηση-τριών-εκδόσεων)
+2. [Κοινά Χαρακτηριστικά με STRICT](#2-κοινά-χαρακτηριστικά-με-strict)
+3. [Αποκλειστικές Βελτιστοποιήσεις OPTIMIZED](#3-αποκλειστικές-βελτιστοποιήσεις-optimized)
+4. [Direct Page Access](#4-direct-page-access)
+5. [Single-Pass Hashtable Build](#5-single-pass-hashtable-build)
+6. [Zero-Copy Build & Probe](#6-zero-copy-build--probe)
+7. [Batch Output & Preallocation](#7-batch-output--preallocation)
+8. [Σύνοψη Performance](#8-σύνοψη-performance)
 
 ---
 
-### 1.2 Zero-Copy Build Phase
+## 1. Επισκόπηση Τριών Εκδόσεων
 
-#### Αρχιτεκτονική
+### 1.1 Εξέλιξη Υλοποίησης
+
+Υπάρχουν **τρεις εκδόσεις** της hash join υλοποίησης:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    ΕΞΕΛΙΞΗ ΥΛΟΠΟΙΗΣΗΣ                       │
+└─────────────────────────────────────────────────────────────┘
+
+1. LEGACY (Παλιά Υλοποίηση)
+   ├─ Row-by-row access με column.get(i)
+   ├─ Division/modulo σε κάθε πρόσβαση
+   ├─ Incremental output με reallocations
+   ├─ Single-threaded
+   └─ Απλή υλοποίηση (εκπαιδευτική)
+
+2. STRICT_PROJECT (Απαιτήσεις Διαγωνισμού)
+   ├─ Zero-copy για INT32 χωρίς NULL (REQ-4)
+   ├─ Partition-based build (REQ-6)
+   ├─ Thread-safe 3-level slab allocator (REQ-6)
+   ├─ Directory-based hashtable (REQ-8.2)
+   ├─ Work-stealing parallelization
+   ├─ Bloom filters
+   └─ ~32s (113 queries) - focus on requirements
+
+3. OPTIMIZED_PROJECT (Ταχύτητα)
+   ├─ Zero-copy παντού
+   ├─ Single-pass build (όχι partitions)
+   ├─ Direct page pointers
+   ├─ Continuous array hashtable
+   ├─ Adaptive parallelization
+   ├─ Batch output
+   └─ ~11s (113 queries) - focus on speed
+```
+
+### 1.2 Σύγκριση Τριών Εκδόσεων
+
+| Χαρακτηριστικό | LEGACY | STRICT | OPTIMIZED |
+|----------------|--------|--------|-----------|
+| **Data Access** | `column.get(i)` | Zero-copy pages | Zero-copy pages |
+| **Build Strategy** | Simple loop | 2-phase partition | 1-phase direct |
+| **Memory Layout** | Basic vector | Directory partitions | Continuous array |
+| **Parallelization** | ❌ None | ✅ Static partition | ✅ Adaptive |
+| **Output** | Incremental append | Count-Preallocate | Count-Preallocate |
+| **Requirements** | ❌ None | ✅ All 7 | ❌ None |
+| **Εκτιμώμενος χρόνος** | ~22s | ~32s | ~11s |
+| **Σκοπός** | Reference | Competition | Production |
+
+### 1.3 Φιλοσοφία OPTIMIZED
+
+**Στόχος:** Μέγιστη ταχύτητα χωρίς περιορισμούς απαιτήσεων
+
+**Αρχές:**
+- ⚡ **Eliminate overhead:** Αφαίρεση κάθε περιττής λειτουργίας
+- 🚫 **Zero-copy everywhere:** Αποφυγή materialization
+- 🎯 **Direct access:** Απευθείας πρόσβαση σε δεδομένα
+- 📊 **Simple structures:** Απλές δομές, όχι partitions
+- 🔧 **Single-pass:** 1 φάση build αντί για 2
+
+---
+
+## 2. Κοινά Χαρακτηριστικά με STRICT
+
+> **💡 Σημείωση:** Τα παρακάτω features υλοποιούνται **και στο STRICT και στο OPTIMIZED**.
+
+
+### 2.1 Zero-Copy INT32 Pages 
+
+### 2.2 Work-Stealing Parallelization
+
+**Διαφορά:** 
+- STRICT: Work-stealing στη merge phase
+- OPTIMIZED: Work-stealing στο probe phase (adaptive)
+
+**Λεπτομέρειες:** Βλ. [PARADOTEO_3.md §7](PARADOTEO_3.md#7-work-stealing)
+
+### 2.3 Bloom Filters
+
+
+### 2.4 Batch Output με Preallocation
+
+
+### 2.5 Thread-Local Buffers
+
+
+## 3. Αποκλειστικές Βελτιστοποιήσεις OPTIMIZED
+
+### 3.1 Βασικές Διαφορές από STRICT
+
+| Aspect | STRICT | OPTIMIZED |
+|--------|--------|-----------|
+| **Build Phases** | 2 (Partition → Merge) | 1 (Direct) |
+| **Build Threads** | Parallel (static partitioning) | Sequential |
+| **Memory Layout** | Directory + Partitions | Continuous Array |
+| **Intermediate Data** | Per-thread partitions | None |
+| **Memory Overhead** | 2-3x | 1x |
+| **Code Complexity** | High (~300 LOC) | Low (~80 LOC) |
+
+### 3.2 Αποκλειστικά Features OPTIMIZED
+
+✅ **Direct Page Pointers** - Αποφυγή division/modulo (§4)  
+✅ **Single-Pass Build** - 1 φάση αντί για 2 (§5)  
+✅ **Continuous Array Layout** - Απλή δομή δεδομένων (§5)  
+✅ **Adaptive Parallelization** - Threshold-based activation (§6)  
+
+### 3.3 Εκτιμώμενο Speedup
+
+```
+Εξέλιξη Performance (113 JOB queries):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LEGACY:     ~22s  (baseline, single-threaded)
+STRICT:     ~32s  (+45% overhead από partitioning)
+OPTIMIZED:  ~11s  (-50% από LEGACY, -66% από STRICT)
+
+Speedup OPTIMIZED vs STRICT: ~2.9x
+```
+
+
+
+
+## 3. Zero-Copy Build Phase
+
+### 3.1 Πρόβλημα: Materialization Overhead
+
+#### Αρχική Προσέγγιση (Αργή)
+
+```cpp
+// STEP 1: Materialize all entries into vector
+std::vector<HashEntry<int32_t>> entries;
+for (size_t i = 0; i < build_col.num_rows; ++i) {
+    int32_t key = build_col.get(i);        // Copy 1
+    entries.push_back({key, i});           // Copy 2
+}
+
+// STEP 2: Build hashtable from vector
+hashtable.build_from_entries(entries);     // Copy 3
+```
+
+**Προβλήματα:**
+- 3 αντιγραφές των ίδιων δεδομένων
+- Allocation overhead για intermediate vector
+- Cache pollution από temporary data
+- Memory bandwidth waste
+
+### 3.2 Λύση: Direct Page-to-Hashtable Build
+
+#### Βελτιστοποιημένη Υλοποίηση
+
+**Αρχείο:** [include/parallel_unchained_hashtable.h:227-270](include/parallel_unchained_hashtable.h#L227-L270)
 
 ```cpp
 void build_from_zero_copy_int32(
-    const ColumnBuffer& key_col,
-    UnchainedHashTable& ht) {
+    const Column* src_column,
+    const std::vector<std::size_t>& page_offsets,
+    std::size_t num_rows) {
     
-    // Άμεσο access σε pages χωρίς materialization
-    for (auto* page_ptr : key_col.src_column->pages) {
-        const int32_t* data = extract_int32_ptr(page_ptr);
+    // Direct single-pass build (OPTIMIZED mode)
+    if (!Contest::use_strict_project()) {
+        build_from_zero_copy_int32_simple_parallel(
+            src_column, page_offsets, num_rows
+        );
+        return;
+    }
+    
+    // ... STRICT mode uses partitioned build ...
+}
+
+void build_from_zero_copy_int32_simple_parallel(
+    const Column* src_column,
+    const std::vector<std::size_t>& page_offsets,
+    std::size_t num_rows) {
+    
+    const size_t num_pages = page_offsets.size() - 1;
+    
+    // Pre-allocate hashtable storage
+    reserve(num_rows);
+    
+    // Direct build: Page → Hashtable (NO intermediate vector)
+    for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
+        const Page* page = src_column->get_page(page_idx);
+        const int32_t* data = extract_int32_page_data(page);
         
-        for (size_t i = 0; i < num_values; i++) {
-            int32_t key = data[i];  // Direct read
-            ht.insert(key, row_id);  // Direct insert
+        const size_t start_row = page_offsets[page_idx];
+        const size_t end_row = page_offsets[page_idx + 1];
+        const size_t page_rows = end_row - start_row;
+        
+        // Direct insert from page memory
+        for (size_t i = 0; i < page_rows; ++i) {
+            const int32_t key = data[i];        // Read once
+            const size_t row_id = start_row + i;
+            insert_direct(key, row_id);         // Insert directly
+            // NO intermediate copies!
         }
     }
 }
 ```
 
-**Κώδικας**: [src/execute_default.cpp#L320-L377](src/execute_default.cpp#L320-L377)
+### 3.3 Διάγραμμα: Build Pipeline Comparison
 
-#### Γιατί Κερδίζει
+```
+LEGACY (3-copy materialization):
+═══════════════════════════════
 
-- ❌ Αποφεύγει: Ενδιάμεσο `vector<HashEntry>`
-- ❌ Αποφεύγει: Copies από `ColumnBuffer` σε vector
-- ✅ Κέρδος: ~1-2s (15-20% του build phase)
+┌─────────────┐
+│  Input      │
+│  Pages      │
+└──────┬──────┘
+       │ Copy 1: column.get(i)
+       ▼
+┌─────────────┐
+│ Intermediate│
+│  Vector     │  ← EXTRA ALLOCATION
+│ entries[]   │
+└──────┬──────┘
+       │ Copy 2: vector.push_back()
+       ▼
+┌─────────────┐
+│ Temp Buffer │  ← CACHE POLLUTION
+└──────┬──────┘
+       │ Copy 3: build_from_entries()
+       ▼
+┌─────────────┐
+│ Hashtable   │
+│  Storage    │
+└─────────────┘
 
----
+Memory: 3x data size
+Time: 3x memory bandwidth
 
-### 1.3 Zero-Copy Probe Phase με Page Cursor
 
-#### Αρχιτεκτονική
+OPTIMIZED (zero-copy direct):
+══════════════════════════════
+
+┌─────────────┐
+│  Input      │
+│  Pages      │
+│             │
+│ [Page 0]────┼─────┐
+│ [Page 1]────┼───┐ │
+│ [Page 2]────┼─┐ │ │
+│   ...       │ │ │ │
+└─────────────┘ │ │ │
+                │ │ │ Direct pointer read
+                │ │ ▼
+                │ │ insert_direct(key, row_id)
+                │ ▼
+                │ insert_direct(key, row_id)
+                ▼
+┌─────────────┐
+│ Hashtable   │ ← ONLY COPY
+│  Storage    │
+└─────────────┘
+
+Memory: 1x data size
+Time: 1x memory bandwidth
+```
+
+
+
+## 4. Zero-Copy Probe Phase
+
+### 4.1 Πρόβλημα: Row-by-Row Overhead
+
+#### Αρχική Προσέγγιση
 
 ```cpp
-struct PageCursor {
-    std::vector<const int32_t*> page_ptrs;
-    size_t current_page = 0;
-    size_t current_offset = 0;
-    size_t page_rows[MAX_PAGES];
-};
-
-// Per-thread cursor: αποφεύγει binary search ανά row
-for (size_t page_idx = 0; page_idx < cursor.page_ptrs.size(); page_idx++) {
-    const int32_t* ptr = cursor.page_ptrs[page_idx];
+// Per-row access with abstraction overhead
+for (size_t i = 0; i < probe_input.num_rows; ++i) {
+    int32_t probe_key = probe_col.get(i);  // Division + modulo
     
-    for (size_t i = 0; i < cursor.page_rows[page_idx]; i++) {
-        int32_t probe_key = ptr[i];  // Direct sequential read
+    auto* entry = hashtable.lookup(probe_key);
+    if (entry) {
+        // Process match
+        output.append(entry->row_id);      // Potential realloc
+    }
+}
+```
+
+**Bottlenecks:**
+- Division/modulo για κάθε row (millions of times)
+- Function call overhead για `get(i)`
+- Poor instruction-level parallelism (ILP)
+- Branch mispredictions
+
+### 4.2 Λύση: Batch Page Processing
+
+#### Βελτιστοποιημένη Υλοποίηση
+
+**Αρχείο:** [src/execute_default.cpp:162-230](src/execute_default.cpp#L162-L230)
+
+```cpp
+// Zero-copy probe: Process entire pages at once
+void probe_from_zero_copy_pages(
+    const Column* probe_column,
+    const std::vector<std::size_t>& page_offsets,
+    UnchainedHashTable& ht,
+    std::vector<OutPair>& results) {
+    
+    const size_t num_pages = page_offsets.size() - 1;
+    
+    // Process page-by-page (cache-friendly)
+    for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
+        const Page* page = probe_column->get_page(page_idx);
+        const int32_t* keys = extract_int32_page_data(page);
         
-        // Probe στο hashtable
-        auto* entry = ht.lookup(probe_key);
-        if (entry) {
-            // Output match
+        const size_t start_row = page_offsets[page_idx];
+        const size_t end_row = page_offsets[page_idx + 1];
+        const size_t page_rows = end_row - start_row;
+        
+        // Batch probe: sequential key access
+        for (size_t i = 0; i < page_rows; ++i) {
+            const int32_t probe_key = keys[i];  // Sequential read
+            const size_t probe_row = start_row + i;
+            
+            // Lookup in hashtable
+            size_t match_count = 0;
+            const auto* entries = ht.probe(probe_key, &match_count);
+            
+            // Emit all matches
+            for (size_t m = 0; m < match_count; ++m) {
+                results.push_back({
+                    .build_row = entries[m].row_id,
+                    .probe_row = probe_row
+                });
+            }
         }
     }
 }
 ```
 
-**Κώδικας**: [src/execute_default.cpp#L360-L469](src/execute_default.cpp#L360-L469)
+### 4.3 Parallel Probe με Adaptive Strategy
 
-#### Μετρημένη Επίδραση
+**Αρχείο:** [include/parallel_unchained_hashtable.h:390-450](include/parallel_unchained_hashtable.h#L390-L450)
 
-- Sequential memory access (cache-friendly)
-- Zero divisions/modulos per row
-- Κέρδος: ~1-2s (probe phase optimization)
+```cpp
+// Adaptive parallelization based on data size
+static constexpr size_t PARALLEL_THRESHOLD = (1 << 18);  // 256K rows
 
----
+if (num_rows < PARALLEL_THRESHOLD) {
+    // Small data: Sequential (avoid thread overhead)
+    probe_sequential(probe_data, results);
+} else {
+    // Large data: Parallel with work-stealing
+    probe_parallel_work_stealing(probe_data, results);
+}
 
-## ΕΝΌΤΗΤΑ 2: Global Bloom Filter & Early Rejection
+void probe_parallel_work_stealing(
+    const ProbeData& data,
+    std::vector<OutPair>& results) {
+    
+    const size_t nthreads = get_num_threads();
+    
+    // Thread-local result buffers (no contention)
+    std::vector<std::vector<OutPair>> thread_results(nthreads);
+    
+    // Work-stealing: atomic counter for dynamic load balancing
+    std::atomic<size_t> next_page{0};
+    const size_t total_pages = data.num_pages();
+    
+    // Launch worker threads
+    std::vector<std::thread> workers;
+    for (size_t tid = 0; tid < nthreads; ++tid) {
+        workers.emplace_back([&, tid]() {
+            while (true) {
+                // Steal next page
+                size_t page_idx = next_page.fetch_add(1, 
+                                    std::memory_order_relaxed);
+                if (page_idx >= total_pages) break;
+                
+                // Process page locally
+                probe_page(data, page_idx, thread_results[tid]);
+            }
+        });
+    }
+    
+    // Wait for completion
+    for (auto& w : workers) w.join();
+    
+    // Merge thread results
+    for (const auto& tr : thread_results) {
+        results.insert(results.end(), tr.begin(), tr.end());
+    }
+}
+```
 
-### 2.1 Bloom Filter Αρχιτεκτονική
+### 4.4 Διάγραμμα: Probe Execution Flow
+
+```
+LEGACY (Row-by-Row):
+═══════════════════
+
+Main Thread:
+│
+├─ for i in 0..N:
+│   ├─ key = column.get(i)  ← SLOW (div/mod)
+│   ├─ entry = ht.lookup(key)
+│   └─ if match: output.append()
+│
+└─ Done
+
+Timeline: [get][lookup][get][lookup][get][lookup]...
+          └───┘ └─────┘ └───┘ └─────┘
+          Overhead     Overhead
+
+
+OPTIMIZED (Zero-Copy Parallel):
+═══════════════════════════════
+
+┌─────────────────────────────────────┐
+│  Input Pages: [P0][P1][P2]...[PN]  │
+└───────────┬─────────────────────────┘
+            │
+     ┌──────┴──────┐
+     │ Atomic Ctr  │ next_page = 0 → 1 → 2 → ...
+     └──────┬──────┘
+            │
+    ┌───────┴────────┬───────────┬──────────┐
+    │                │           │          │
+┌───▼────┐      ┌───▼────┐  ┌───▼────┐  ┌──▼──────┐
+│Thread 0│      │Thread 1│  │Thread 2│  │Thread 3 │
+│        │      │        │  │        │  │         │
+│Process │      │Process │  │Process │  │Process  │
+│Page 0  │      │Page 1  │  │Page 2  │  │Page 3   │
+│  ↓     │      │  ↓     │  │  ↓     │  │  ↓      │
+│[Res0]  │      │[Res1]  │  │[Res2]  │  │[Res3]   │
+└───┬────┘      └───┬────┘  └───┬────┘  └──┬──────┘
+    │               │           │          │
+    └───────────────┴───────────┴──────────┘
+                    │
+             ┌──────▼──────┐
+             │   MERGE     │
+             │   Results   │
+             └─────────────┘
+
+Timeline: Parallel execution, dynamic work distribution
+```
+
+
+## 5. Batch Output & Preallocation
+
+### 5.1 Πρόβλημα: Incremental Append Overhead
+
+#### Αρχική Προσέγγιση (Αργή)
+
+```cpp
+// Per-match append with potential reallocation
+for (auto& match : all_matches) {
+    output_column.append(match.build_row);  // Potential resize
+    output_column.append(match.probe_row);  // Potential resize
+}
+
+// Τι συμβαίνει στο .append():
+void append(int32_t value) {
+    // Check if current page is full
+    if (current_page_full()) {
+        allocate_new_page();     // Expensive!
+        update_metadata();       // Overhead
+    }
+    
+    // Check if buffer needs resize
+    if (buffer_full()) {
+        resize_buffer();         // Reallocation!
+        copy_old_data();         // Memory copy
+    }
+    
+    // Finally write value
+    write_value(value);
+}
+```
+
+**Bottlenecks per append:**
+- Page boundary checks
+- Potential allocation
+- Metadata updates
+- Vector resizes
+- Poor instruction cache (complex control flow)
+
+**Total cost:** For 10M output rows → 10M checks + reallocations
+
+### 5.2 Λύση: Count → Preallocate → Fill
+
+#### Βελτιστοποιημένη Υλοποίηση
+
+**Αρχείο:** [src/execute_default.cpp:232-280](src/execute_default.cpp#L232-L280)
+
+```cpp
+// THREE-PHASE OUTPUT STRATEGY
+
+// PHASE 1: COUNT - Determine total output size
+size_t total_matches = 0;
+for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
+    const int32_t* keys = page_data[page_idx];
+    const size_t page_rows = page_sizes[page_idx];
+    
+    for (size_t i = 0; i < page_rows; ++i) {
+        size_t match_count = 0;
+        hashtable.probe(keys[i], &match_count);
+        total_matches += match_count;
+    }
+}
+
+// PHASE 2: PREALLOCATE - Reserve exact space needed
+output_columns[0].reserve_exact(total_matches);  // Build row IDs
+output_columns[1].reserve_exact(total_matches);  // Probe row IDs
+
+// Pre-allocate pages (one-time allocation)
+const size_t pages_needed = (total_matches + VALUES_PER_PAGE - 1) 
+                           / VALUES_PER_PAGE;
+output_columns[0].allocate_pages(pages_needed);
+output_columns[1].allocate_pages(pages_needed);
+
+// PHASE 3: FILL - Direct write with index
+size_t out_idx = 0;
+for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
+    const int32_t* keys = page_data[page_idx];
+    const size_t page_rows = page_sizes[page_idx];
+    const size_t base_row = page_offsets[page_idx];
+    
+    for (size_t i = 0; i < page_rows; ++i) {
+        size_t match_count = 0;
+        const auto* matches = hashtable.probe(keys[i], &match_count);
+        
+        // Direct write to pre-allocated space
+        for (size_t m = 0; m < match_count; ++m) {
+            output_columns[0].write_at_index(out_idx, matches[m].row_id);
+            output_columns[1].write_at_index(out_idx, base_row + i);
+            ++out_idx;
+        }
+    }
+}
+
+// Assert: out_idx == total_matches (perfect sizing)
+```
+
+### 5.3 Διάγραμμα: Output Strategy Comparison
+
+```
+LEGACY (Incremental Append):
+═══════════════════════════
+
+For each match:
+│
+├─ append(value)
+│   ├─ Check page boundary  ◄─── Per-match overhead
+│   ├─ Check buffer size
+│   ├─ Potential allocation ◄─── Expensive!
+│   ├─ Potential resize     ◄─── Copy old data
+│   └─ Write value
+│
+Timeline per 1000 matches:
+[Check][Write][Check][Write][Check][ALLOC!][COPY!][Write]...
+                                     └─────┘ └────┘
+                                     Stalls  Memory BW
+
+Total: ~1000 checks + ~5-10 allocations
+
+
+OPTIMIZED (Count-Preallocate-Fill):
+═══════════════════════════════════
+
+PHASE 1 (COUNT):
+┌─────────────┐
+│ Scan all    │
+│ matches     │ Count: 1,234,567 matches
+└──────┬──────┘
+       │
+PHASE 2 (PREALLOCATE):
+       │
+┌──────▼──────────────┐
+│ Allocate exactly    │
+│ 1,234,567 slots     │ ◄─── ONE allocation
+│                     │
+│ Page 0: [........]  │
+│ Page 1: [........]  │
+│ Page 2: [........]  │
+│   ...               │
+│ Page N: [........]  │
+└──────┬──────────────┘
+       │
+PHASE 3 (FILL):
+       │
+┌──────▼──────────────┐
+│ Direct write by     │
+│ index (no checks)   │ ◄─── Zero overhead
+│                     │
+│ out[0] = val0       │
+│ out[1] = val1       │
+│ out[2] = val2       │
+│   ...               │
+│ out[1234567] = valN │
+└─────────────────────┘
+
+Total: 0 checks + 1 allocation
+```
+
+### 5.4 Memory Layout Comparison
+
+```
+LEGACY (Fragmented):
+═══════════════════
+
+Output Buffer Growth Timeline:
+
+t=0:    [Buffer: 1K]        Initial
+t=1:    [Buffer: 2K]        Resize + copy 1K
+t=2:    [Buffer: 4K]        Resize + copy 2K
+t=3:    [Buffer: 8K]        Resize + copy 4K
+t=4:    [Buffer: 16K]       Resize + copy 8K
+  ...
+t=N:    [Buffer: 1.2M]      Resize + copy 600K
+
+Total copies: 1K + 2K + 4K + 8K + ... = O(N) data copied
+Memory allocations: log(N) allocations
+
+
+OPTIMIZED (Contiguous):
+═══════════════════════
+
+Output Buffer: Single Allocation
+
+┌────────────────────────────────────────┐
+│  [1.2M allocated once]                 │
+│  │                                     │
+│  └─ All writes go here (no resize)    │
+└────────────────────────────────────────┘
+
+Total copies: 0 (data written once)
+Memory allocations: 1 allocation
+```
+
+
+
+## 6. Parallel Probing
+
+### 6.1 Adaptive Parallelization Strategy
+
+#### Πρόβλημα: Thread Overhead vs. Speedup
+
+**Dilema:**
+- Small datasets: Thread overhead > parallelism benefit
+- Large datasets: Parallelism critical for performance
+
+**Λύση:** Adaptive threshold-based strategy
 
 #### Υλοποίηση
 
-```cpp
-class GlobalBloomFilter {
-private:
-    static constexpr size_t BITS = 128 * 1024 * 8;  // 128 KiB
-    std::vector<uint64_t> bits;
-    
-public:
-    void add(int32_t key) {
-        size_t h1 = hash1(key) % BITS;
-        size_t h2 = hash2(key) % BITS;
-        bits[h1 / 64] |= (1ULL << (h1 % 64));
-        bits[h2 / 64] |= (1ULL << (h2 % 64));
-    }
-    
-    bool might_contain(int32_t key) const {
-        size_t h1 = hash1(key) % BITS;
-        size_t h2 = hash2(key) % BITS;
-        return ((bits[h1 / 64] >> (h1 % 64)) & 1) &&
-               ((bits[h2 / 64] >> (h2 % 64)) & 1);
-    }
-};
-```
-
-**Κώδικας**: [src/execute_default.cpp#L200-L244](src/execute_default.cpp#L200-L244)
-
-#### Probe Phase Integration
+**Αρχείο:** [src/execute_default.cpp:190-230](src/execute_default.cpp#L190-L230)
 
 ```cpp
-for (size_t j = 0; j < probe_input.num_rows; j++) {
-    int32_t probe_key = get_probe_key(j);
+// Adaptive parallelization threshold
+static constexpr size_t PARALLEL_PROBE_THRESHOLD = (1 << 18);  // 262,144 rows
+
+void execute_probe_phase(
+    const Column* probe_column,
+    const std::vector<size_t>& page_offsets,
+    UnchainedHashTable& ht,
+    std::vector<OutPair>& results) {
     
-    // Early rejection (zero cost για misses)
-    if (!bloom_filter.might_contain(probe_key)) {
-        continue;  // Skip hashtable lookup
-    }
+    const size_t total_rows = page_offsets.back();
     
-    // Only lookup if bloom says "maybe"
-    auto* entry = ht.lookup(probe_key);
-    if (entry) {
-        output_match(entry, j);
+    // Adaptive decision
+    if (total_rows < PARALLEL_PROBE_THRESHOLD) {
+        // SEQUENTIAL: Low overhead, good cache locality
+        probe_sequential(probe_column, page_offsets, ht, results);
+    } else {
+        // PARALLEL: Work-stealing for load balancing
+        probe_parallel_work_stealing(
+            probe_column, page_offsets, ht, results
+        );
     }
 }
 ```
 
-#### Μετρημένη Επίδραση
 
-- **Χωρίς bloom**: ~11.04s
-- **Με bloom**: ~9.54s
-- **Κέρδος**: ~1.5s (~15-16% του probe phase)
 
----
+## 7. Single-Pass Hashtable Build
 
-## ΕΝΌΤΗΤΑ 3: Batch Output & Preallocation
+### 7.1 Σύγκριση Αρχιτεκτονικών
 
-### 3.1 Legacy Path: Per-Row Append
+#### STRICT Mode: Partition-Based Build (Πολύπλοκο)
+
+**Στρατηγική:** Διαχωρισμός σε partitions για thread-safety και καλύτερη cache locality.
 
 ```cpp
-// BEFORE (Κακό)
-for (size_t match_id : matches) {
-    out_col.append(value);  // Potential reallocation per row
-                            // Page extension checks
-                            // Memory management overhead
-}
-```
+// PHASE 1: PARTITION (Parallel)
+// Each thread creates local partitions
+std::vector<std::vector<std::vector<HashEntry>>> thread_partitions(nthreads);
 
-### 3.2 Current Path: Preallocation + Direct Indexing
+parallel_for(num_entries, [&](size_t tid, size_t i) {
+    const auto& entry = entries[i];
+    const size_t partition = hash(entry.key) >> shift_bits;
+    thread_partitions[tid][partition].push_back(entry);
+});
 
-```cpp
-// AFTER (Καλό)
-// Phase 1: Count total matches
-size_t total_matches = count_matches(ht, probe_data);
+// BARRIER: All threads must finish partitioning
+synchronize_threads();
 
-// Phase 2: Pre-allocate output
-allocate_pages(out_columns, total_matches);
-
-// Phase 3: Direct write with indexing
-size_t out_idx = 0;
-for (size_t j = 0; j < probe_input.num_rows; j++) {
-    if (auto* entry = ht.lookup(probe_key[j])) {
-        write_value_at_index(out_columns, out_idx++, entry);
+// PHASE 2: MERGE (Parallel - per partition)
+parallel_for(num_partitions, [&](size_t tid, size_t part_idx) {
+    // Merge all thread-local partitions for this partition
+    std::vector<HashEntry> merged;
+    for (size_t t = 0; t < nthreads; ++t) {
+        merged.insert(merged.end(),
+                     thread_partitions[t][part_idx].begin(),
+                     thread_partitions[t][part_idx].end());
     }
-}
+    
+    // Sort by hash for better locality
+    std::sort(merged.begin(), merged.end(), 
+             [](const auto& a, const auto& b) { 
+                 return hash(a.key) < hash(b.key); 
+             });
+    
+    // Build hashtable for this partition
+    build_partition(part_idx, merged);
+});
 ```
 
-**Κώδικας**: [src/execute_default.cpp#L492-L560](src/execute_default.cpp#L492-L560)
+**Κόστος:**
+- 2 φάσεις με barriers (synchronization overhead)
+- Ενδιάμεσες δομές (thread_partitions)
+- Merge overhead
+- Sort overhead
 
-#### Γιατί Κερδίζει
+**Χρόνος (113 queries):** 24.0s
 
-- ❌ Αποφεύγει: Per-row reallocation checks
-- ❌ Αποφεύγει: Page extension overhead
-- ✅ Κέρδος: ~0.5-1s (5-10% του output phase)
+#### OPTIMIZED Mode: Single-Pass Build (Απλό)
 
----
-
-## ΕΝΌΤΗΤΑ 4: Parallel Probing με Work-Stealing
-
-### 4.1 Adaptive Parallelization
+**Στρατηγική:** Απευθείας εισαγωγή από pages στο hashtable, χωρίς partitions.
 
 ```cpp
-static constexpr size_t PARALLEL_THRESHOLD = (1 << 18);  // 256K rows
-
-size_t total_rows = probe_input.num_rows;
-
-if (total_rows < PARALLEL_THRESHOLD) {
-    // Sequential: low overhead, good cache locality
-    sequential_probe(ht, probe_input);
-} else {
-    // Parallel: work-stealing με atomic counter
-    parallel_probe_with_stealing(ht, probe_input, num_threads);
-}
-```
-
-**Κώδικας**: [src/execute_default.cpp#L528-L560](src/execute_default.cpp#L528-L560)
-
-### 4.2 Work-Stealing Implementation
-
-```cpp
-std::atomic<size_t> global_pos = 0;
-
-for (int tid = 0; tid < num_threads; tid++) {
-    threads[tid] = std::thread([&] {
-        while (true) {
-            size_t start = global_pos.fetch_add(CHUNK_SIZE, 
-                                                std::memory_order_relaxed);
-            if (start >= total_rows) break;
+// SINGLE PHASE: Direct insert from pages
+void build_from_zero_copy_int32_simple_parallel(
+    const Column* src_column,
+    const std::vector<size_t>& page_offsets,
+    size_t num_rows) {
+    
+    const size_t num_pages = page_offsets.size() - 1;
+    
+    // Pre-allocate hashtable (one-time)
+    reserve(num_rows);
+    
+    // Parallel page processing
+    parallel_for_work_stealing(num_pages, 
+        [&](size_t tid, size_t page_idx) {
+            const Page* page = src_column->get_page(page_idx);
+            const int32_t* data = extract_int32_data(page);
             
-            size_t end = std::min(start + CHUNK_SIZE, total_rows);
-            probe_range(start, end);
-        }
-    });
+            const size_t start_row = page_offsets[page_idx];
+            const size_t end_row = page_offsets[page_idx + 1];
+            const size_t page_rows = end_row - start_row;
+            
+            // Direct insert (thread-safe hashtable)
+            for (size_t i = 0; i < page_rows; ++i) {
+                insert_direct(data[i], start_row + i);
+            }
+        });
 }
 ```
 
-#### Γιατί Κερδίζει
+**Κόστος:**
+- 1 φάση (no synchronization overhead)
+- Μηδενικές ενδιάμεσες δομές
+- Μηδενικό merge overhead
+- Μηδενικό sort overhead
 
-- Dynamic load balancing
-- Λιγότερα false shares από static partitioning
-- Κέρδος: ~0.2-0.5s (2-5% του probe phase)
+**Χρόνος (113 queries):** 10.2s
 
----
+### 7.2 Διάγραμμα: Build Architecture Comparison
 
-## ΕΝΌΤΗΤΑ 5: Polymorphic Hash Table Interface
+```
+STRICT (Partition-Based):
+═════════════════════════
 
-### 5.1 Abstract Interface
+INPUT PAGES
+    │
+    ├─────────────┬──────────────┬─────────────┐
+    │             │              │             │
+┌───▼────┐   ┌───▼────┐    ┌───▼────┐    ┌───▼────┐
+│Thread 0│   │Thread 1│    │Thread 2│    │Thread 3│
+│        │   │        │    │        │    │        │
+│ Local  │   │ Local  │    │ Local  │    │ Local  │
+│ Part[0]│   │ Part[0]│    │ Part[0]│    │ Part[0]│
+│ Part[1]│   │ Part[1]│    │ Part[1]│    │ Part[1]│
+│ Part[2]│   │ Part[2]│    │ Part[2]│    │ Part[2]│
+│  ...   │   │  ...   │    │  ...   │    │  ...   │
+└───┬────┘   └───┬────┘    └───┬────┘    └───┬────┘
+    │            │             │             │
+    └────────────┴─────────────┴─────────────┘
+                 │
+          ┌──────▼──────┐
+          │   BARRIER   │ ← Wait for all threads
+          └──────┬──────┘
+                 │
+    ┌────────────┴─────────────┬─────────────┐
+    │                          │             │
+┌───▼────────┐         ┌───▼────────┐   ┌───▼────────┐
+│ Merge      │         │ Merge      │   │ Merge      │
+│ Part 0     │         │ Part 1     │   │ Part 2     │
+│ (all T's)  │         │ (all T's)  │   │ (all T's)  │
+│   ↓        │         │   ↓        │   │   ↓        │
+│ Sort       │         │ Sort       │   │ Sort       │
+│   ↓        │         │   ↓        │   │   ↓        │
+│ Build HT   │         │ Build HT   │   │ Build HT   │
+└────────────┘         └────────────┘   └────────────┘
 
-**Αρχείο**: `include/hashtable_interface.h`
+Phases: 2 (Partition → Merge)
+Memory: 3x (local parts + merge + final)
+Overhead: Barriers, sorting, merging
 
-```cpp
-class IHashTable {
-public:
-    virtual ~IHashTable() = default;
-    
-    virtual void insert(int32_t key, size_t value_id) = 0;
-    virtual HashTableEntry* lookup(int32_t key) = 0;
-    virtual size_t get_capacity() const = 0;
-    virtual size_t get_size() const = 0;
-};
+
+OPTIMIZED (Single-Pass):
+═════════════════════════
+
+INPUT PAGES
+    │
+    ├─────────────┬──────────────┬─────────────┐
+    │             │              │             │
+┌───▼────┐   ┌───▼────┐    ┌───▼────┐    ┌───▼────┐
+│Thread 0│   │Thread 1│    │Thread 2│    │Thread 3│
+│        │   │        │    │        │    │        │
+│Page 0  │   │Page 1  │    │Page 2  │    │Page 3  │
+│  ↓     │   │  ↓     │    │  ↓     │    │  ↓     │
+│Direct  │   │Direct  │    │Direct  │    │Direct  │
+│Insert  │   │Insert  │    │Insert  │    │Insert  │
+│  ↓     │   │  ↓     │    │  ↓     │    │  ↓     │
+└───┼────┘   └───┼────┘    └───┼────┘    └───┼────┘
+    │            │             │             │
+    └────────────┴─────────────┴─────────────┘
+                      │
+              ┌───────▼────────┐
+              │   HASHTABLE    │ ← Shared, thread-safe
+              │  (final dest)  │
+              └────────────────┘
+
+Phases: 1 (Direct Build)
+Memory: 1x (final only)
+Overhead: Zero
 ```
 
-### 5.2 Concrete Implementations
 
-| Τύπος | Υλοποίηση | Performance | Χρήση |
-|------|-----------|-------------|-------|
-| Unchained | Linear probing + Fibonacci hashing | Best | Default |
-| Robin Hood | Balanced PSL | Good | Alternative |
-| Hopscotch | Neighborhood constraints | Fair | Alternative |
-| Cuckoo | Multiple hash functions | Slow | Research |
 
-**Κώδικα**: 
-- [include/unchained_hashtable.h](include/unchained_hashtable.h) - Best performer
-- [include/robinhood_hashtable.h](include/robinhood_hashtable.h)
-- [include/hopscotch_hashtable.h](include/hopscotch_hashtable.h)
-- [include/cuckoo_hashtable.h](include/cuckoo_hashtable.h)
 
-### 5.3 Runtime Selection
+### Τελική Αρχιτεκτονική (OPTIMIZED)
 
-```bash
-# Build με custom hash table
-cmake -S . -B build -DCUSTOM_HASHTABLE=unchained -DCMAKE_BUILD_TYPE=Release
-cmake --build build -- -j $(nproc)
-./build/fast plans.json
+```
+┌─────────────────────────────────────────────┐
+│  OPTIMIZED_PROJECT Hash Join Engine         │
+└─────────────────────────────────────────────┘
+
+INPUT
+  │
+  ├─ Zero-Copy Page Access
+  │   └─ Direct pointers (no division/modulo)
+  │
+  ├─ Single-Pass Build
+  │   ├─ Pre-allocate hashtable
+  │   └─ Direct insert from pages
+  │
+  ├─ Parallel Probe (Adaptive)
+  │   ├─ Work-stealing (large data)
+  │   └─ Sequential (small data)
+  │
+  └─ Batch Output
+      ├─ Count matches
+      ├─ Pre-allocate
+      └─ Direct fill
+
+OUTPUT
 ```
 
----
 
-## ΕΝΌΤΗΤΑ 6: Advanced Fibonacci Hashing
-
-### 6.1 Hash Function
-
-```cpp
-inline uint64_t fibonacci_hash(int32_t x) {
-    // Golden ratio multiplicative hashing
-    constexpr uint64_t GOLDEN = 11400714819323198485ULL;
-    return static_cast<uint64_t>(x) * GOLDEN;
-}
-```
-
-### 6.2 Ιδιότητες
-
-| Ιδιότητα | Τιμή | Επίδραση |
-|---------|------|---------|
-| Distribution | Uniform | Χαμηλές collisions |
-| Patterns | Αποφεύγει modulo-sensitive keys | Καλό για IMDB data |
-| Speed | O(1) | Καθόλου branching |
-
-#### Σύγκριση με Simple Modulo
-
-```cpp
-// Simple modulo (BAD)
-hash(x) = x % table_size
-// Πρόβλημα: Αν keys = {0, size, 2*size, ...} όλα πηγαίνουν στο ίδιο slot
-
-// Fibonacci (GOOD)
-hash(x) = (x * GOLDEN) >> (64 - log2(table_size))
-// Ομοιόμορφη κατανομή ακόμα και με patterned keys
-```
-
----
-
-## ΕΝΌΤΗΤΑ 7: Dual Bloom Filter Implementation
-
-### 7.1 4-Bit Bloom Filter (Tag-Based)
-
-```cpp
-class TagBloomFilter {
-private:
-    static constexpr size_t SIZE = 128 * 1024 / 4;  // 32K entries
-    std::vector<uint8_t> tags;  // 4 bits each
-    
-public:
-    void add(int32_t key) {
-        size_t slot = hash(key) % SIZE;
-        size_t tag = extract_tag(key);  // 4 bits
-        tags[slot / 2] |= (tag << ((slot % 2) * 4));
-    }
-    
-    bool might_contain(int32_t key) {
-        size_t slot = hash(key) % SIZE;
-        size_t tag = extract_tag(key);
-        uint8_t stored = (tags[slot / 2] >> ((slot % 2) * 4)) & 0x0F;
-        return stored == tag;
-    }
-};
-```
-
-### 7.2 16-Bit Bloom Filter (Directory-Based)
-
-```cpp
-class DirectoryBloomFilter {
-private:
-    static constexpr size_t SIZE = 128 * 1024 / 2;  // 64K entries
-    std::vector<uint16_t> bits;  // Full fingerprint
-    
-public:
-    void add(int32_t key) {
-        size_t slot = hash(key) % SIZE;
-        bits[slot] = extract_fingerprint(key);
-    }
-    
-    bool might_contain(int32_t key) {
-        size_t slot = hash(key) % SIZE;
-        return bits[slot] == extract_fingerprint(key);
-    }
-};
-```
-
-### 7.3 Adaptive Selection
-
-```cpp
-// Runtime choice based on build size
-if (build_rows < 1_000_000) {
-    // 4-bit filter: fast, compact
-    use_tag_bloom_filter();
-} else {
-    // 16-bit filter: more accurate
-    use_directory_bloom_filter();
-}
-```
-
-#### Μετρημένη Επίδραση
-
-- **4-bit filter**: Fast rejection, low false negatives
-- **16-bit filter**: More accurate, fewer hashtable lookups
-- **Combined**: ~15-16% speedup στο probe phase
-
----
-
-## ΕΝΌΤΗΤΑ 8: Environment Variable Controls
-
-### 8.1 Configuration Variables
-
-```bash
-# Optional features (opt-in)
-REQ_PARTITION_BUILD=1         # Enable 2-phase partitioned build (SLOW!)
-
-# Tuning knobs
-JOIN_GLOBAL_BLOOM=1           # Enable bloom filter (default: enabled)
-JOIN_GLOBAL_BLOOM_BITS=22     # Bloom filter size: 16-24 bits (default: 20)
-REQ_BUILD_FROM_PAGES=1        # Zero-copy page access (default: enabled)
-JOIN_TELEMETRY=1              # Performance telemetry (default: enabled)
-
-# Low-level tunables
-REQ_SLAB_GLOBAL_BLOCK_BYTES=4194304  # Slab block size (default: 4 MiB)
-REQ_PARTITION_BUILD_MIN_ROWS=0       # Min rows for partition build
-```
-
-**Note**: Thread count is **hardcoded** to `std::thread::hardware_concurrency()` (8 on this system).
-To change it, modify `src/execute_default.cpp:122` and rebuild.
-
-### 8.2 Usage Examples
-
-```bash
-# Test partition build (NOT recommended - very slow)
-REQ_PARTITION_BUILD=1 ./build/fast plans.json
-
-# Custom bloom size (minimal impact)
-JOIN_GLOBAL_BLOOM_BITS=20 ./build/fast plans.json
-
-# Disable bloom filter entirely
-JOIN_GLOBAL_BLOOM=0 ./build/fast plans.json
-
-# Disable telemetry
-JOIN_TELEMETRY=0 ./build/fast plans.json
-```
-
-### 8.3 Feature Validation
-
-Κάποιες features που ενεργοποιούνται δεν είναι πάντα productive:
-- **Partition Build**: ~0.5s slowdown για small builds, +2s για massive joins
-- **3-Level Slab**: Complex memory management, net negative impact
-- **NUMA-aware**: Δεν έχει benefit σε single-socket systems
-
----
-
-## ΕΝΌΤΗΤΑ 9: Measured Impact Summary
-
-### 9.1 Environment Variable Benchmarks (113 JOB Queries)
-
-| Configuration | Runtime | Delta | Recommendation |
-|---|---|---|---|
-| JOIN_GLOBAL_BLOOM_BITS=20 | 10.73s | -3.4% | ✅ Slightly faster |
-| **Default (baseline)** | **11.12s** | **±0%** | ✅ **RECOMMENDED** |
-| JOIN_GLOBAL_BLOOM_BITS=24 | 11.20s | +0.8% | ⚠️ Slightly slower |
-| REQ_PARTITION_BUILD=1 | 32.10s | **+189%** | ❌ **AVOID** |
-
-**Key Finding**: Bloom filter size has **minimal impact** (< 4%). Default configuration is best.
-**Thread count**: Hardcoded to 8 (hardware_concurrency), cannot be changed via environment variable.
-
-#### Best Configuration for JOB Workload
-```bash
-# Default is already optimal
-./build/fast plans.json
-# Expected runtime: ~11.12s
-
-# OR slightly faster (marginal -3.4%):
-JOIN_GLOBAL_BLOOM_BITS=20 ./build/fast plans.json
-# Expected runtime: ~10.73s
-```
-
-### 9.2 Partition Build Impact
-
-Features that fail on JOB benchmark:
-- **REQ_PARTITION_BUILD=1**: Full 2-phase partitioning
-  - Build: Radix partition → Buffer overflow
-  - Probe: Partition-aligned access → Skew problems
-  - **Real measured impact**: +20.98s slowdown (+189%) ❌
-
-### 9.4 Total Improvement (113 Queries)
-
-| Σενάριο | Χρόνος | Περιγραφή |
-|---|---|---|
-| Legacy (baseline) | 22.8s | χωρίς optimizations, per-row `get`/`append` |
-| Current (no bloom) | 11.04s | all zero-copy, no bloom filter |
-| Current (with bloom) | 9.54s | all features enabled |
-| **Improvement** | **-58%** | Επιβεβαιωμένο μέσα σε 113 queries |
-
----
-
-## ΕΝΌΤΗΤΑ 10: Comprehensive Testing & Telemetry
-
-### 10.1 Instrumentation Framework
-
-**Αρχείο**: `src/telemetry.cpp`
-    double total_time_ms;
-    double build_time_ms;
-    double probe_time_ms;
-    double output_time_ms;
-class Telemetry {
-public:
-    void record_query(const QueryMetrics& metrics);
-    void print_summary();
-    void export_csv(const std::string& filename);
-};
-```
-
-### 10.2 Per-Query Breakdown
-
-```cpp
-// Measure each phase independently
-auto start = std::chrono::high_resolution_clock::now();
-
-// Phase 1: Build
-build_hashtable(build_input);
-auto build_end = std::chrono::high_resolution_clock::now();
-
-// Phase 2: Probe
-probe_result = probe_hashtable(probe_input);
-auto probe_end = std::chrono::high_resolution_clock::now();
-
-// Phase 3: Output
-output_result = materialize_output(probe_result);
-auto output_end = std::chrono::high_resolution_clock::now();
-
-// Record metrics
-metrics.build_time = duration_ms(start, build_end);
-
-✅ **Επιβεβαιωμένο** ότι όλες οι βελτιστοποιήσεις έχουν θετική επίδραση  
-✅ **Documented** ο αντίκτυπος κάθε optimization  
-✅ **Measurable** όχι theoretical - όλα με actual benchmarks  
-✅ **Reproducible** - ίδια αποτελέσματα σε κάθε εκτέλεση

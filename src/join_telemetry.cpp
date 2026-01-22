@@ -10,10 +10,10 @@ static thread_local uint64_t g_query_id = 0;
 
 bool join_telemetry_enabled() {
     // (GR) Προαιρετικά stats για να δούμε αν είμαστε memory-bandwidth bound.
-    // Default: ENABLED for performance. Set JOIN_TELEMETRY=0 to disable.
+    // Default: DISABLED. Set JOIN_TELEMETRY=1 to enable.
     static const bool enabled = [] {
         const char* v = std::getenv("JOIN_TELEMETRY");
-        if (!v) return true;  // Default to enabled
+        if (!v) return false;  // Default to disabled
         return *v && *v != '0';
     }();
     return enabled;

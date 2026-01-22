@@ -4,7 +4,6 @@
 #include "plan.h"
 #include "table.h"
 #include "columnar.h"
-#include "join_config.h"
 #include "join_bloom_filter.h"
 
 // ============================================================================
@@ -150,25 +149,6 @@ TEST_CASE("GlobalBloom: hash independence", "[bloom][hash]") {
     
     // Shouldn't have all nearby values present
     REQUIRE(nearby_hits < 10);
-}
-
-TEST_CASE("JoinConfig: build from pages enabled", "[config][zero-copy]") {
-    // Test configuration flag
-    const bool enabled = req_build_from_pages_enabled();
-    
-    // Flag should be deterministic
-    REQUIRE((enabled == true || enabled == false));
-}
-
-TEST_CASE("JoinConfig: bloom filter configuration", "[config][bloom]") {
-    const bool bloom_enabled = join_global_bloom_enabled();
-    
-    if (bloom_enabled) {
-        const int bits = join_global_bloom_bits();
-        // Bloom bits should be reasonable (16-24 typically)
-        REQUIRE(bits >= 10);
-        REQUIRE(bits <= 30);
-    }
 }
 
 TEST_CASE("value_t: INT32 operations", "[value][int32]") {

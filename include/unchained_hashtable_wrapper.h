@@ -3,7 +3,7 @@
 
 #include "hashtable_interface.h"
 #include "parallel_unchained_hashtable.h"  // Parallel version (FASTEST)
-// Alternative: #include "unchained_hashtable.h" για non-parallel version
+// #include "unchained_hashtable.h" 
 #include "hash_functions.h"
 #include "hash_common.h"
 #include <memory>
