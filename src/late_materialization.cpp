@@ -17,48 +17,38 @@ void dump_columnar_debug(const ColumnarTable& table);
 // Helper: Check if INT32 column has any nulls - CORRECT FULL VERSION
 static bool column_has_nulls(const Column& column) {
 
-    // μόνο INT32 μας ενδιαφέρει για zero-copy
+    // Επιστρέφει true αν η στήλη δεν είναι INT32 (zero-copy μόνο για INT32)
     if (column.type != DataType::INT32)
         return true;
 
-    // άδειος -> σίγουρα δεν έχει nulls
+    // Αν δεν υπάρχουν σελίδες, δεν υπάρχουν nulls
     if (column.pages.empty())
         return false;
 
-    // έλεγξε ΟΛΕΣ τις σελίδες
+    // Ελέγχει κάθε σελίδα της στήλης
     for (const auto& page_ptr : column.pages) {
-
-        const uint8_t* page =
-            reinterpret_cast<const uint8_t*>(page_ptr->data);
-
-        uint16_t num_rows =
-            *reinterpret_cast<const uint16_t*>(page);
-
-        // bytes bitmap
+        // Παίρνει pointer στα δεδομένα της σελίδας
+        const uint8_t* page = reinterpret_cast<const uint8_t*>(page_ptr->data);
+        // Διαβάζει τον αριθμό γραμμών της σελίδας
+        uint16_t num_rows = *reinterpret_cast<const uint16_t*>(page);
+        // Υπολογίζει πόσα bytes χρειάζεται το bitmap των nulls
         size_t bitmap_bytes = (num_rows + 7) / 8;
-
-        // bitmap βρίσκεται ΠΑΝΤΑ στο τέλος της σελίδας
-        const uint8_t* bitmap =
-            page + PAGE_SIZE - bitmap_bytes;
-
-        // έλεγχος κάθε byte
+        // Το bitmap βρίσκεται πάντα στο τέλος της σελίδας
+        const uint8_t* bitmap = page + PAGE_SIZE - bitmap_bytes;
+        // Ελέγχει κάθε byte του bitmap
         for (size_t i = 0; i < bitmap_bytes; ++i) {
-
-            // πλήρες byte (8 rows)
+            // Για πλήρες byte (8 rows), όλα τα bits πρέπει να είναι 1 (δηλ. όχι null)
             uint8_t expected = 0xFF;
-
-            // τελευταίο byte -> μάσκα μόνο valid bits
+            // Για το τελευταίο byte, μάσκα μόνο τα valid bits
             if (i == bitmap_bytes - 1 && (num_rows % 8 != 0)) {
                 expected = (1u << (num_rows % 8)) - 1;
             }
-
-            // αν ΔΕΝ είναι όλα 1 → υπάρχει NULL
+            // Αν κάποιο bit δεν είναι 1, υπάρχει null
             if ((bitmap[i] & expected) != expected)
                 return true;
         }
     }
-
-    // δεν βρέθηκαν NULLs σε καμία page
+    // Δεν βρέθηκαν nulls σε καμία σελίδα
     return false;
 }
 

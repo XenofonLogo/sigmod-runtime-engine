@@ -61,7 +61,7 @@ template<typename Key, typename Hasher = Hash::Hasher32>
 class FlatUnchainedHashTable {
 public:
     using entry_type = TupleEntry<Key>;
-    using entry_allocator = std::allocator<entry_type>;  // Use standard allocator (slab has no perf benefit)
+    using entry_allocator = std::allocator<entry_type>;  // Χρήση του τυπικού allocator (ο slab δεν έχει όφελος εδώ)
 
     explicit FlatUnchainedHashTable(Hasher hasher = Hasher(), std::size_t directory_power = 10)
         : hasher_(hasher)
@@ -70,11 +70,11 @@ public:
         dir_mask_ = dir_size_ - 1;
         shift_ = 64 - directory_power;
         
-        // Allocate directory with extra slots for directory[-1] entry (PDF requirement 8.3)
-        // Buffer has dir_size + 2 slots: [-1], [0], [1], ..., [dir_size-1], [dir_size]
+        // Δέσμευση μνήμης για τον directory με επιπλέον θέσεις για το directory[-1] (απαίτηση PDF 8.3)
+        // Το buffer έχει dir_size + 2 θέσεις: [-1], [0], [1], ..., [dir_size-1], [dir_size]
         directory_buffer_.assign(dir_size_ + 2, 0);
-        directory_offsets_ = directory_buffer_.data() + 1;  // Shift pointer so [-1] is valid
-        directory_offsets_[-1] = 0;  // Points to start of tuple storage
+        directory_offsets_ = directory_buffer_.data() + 1;  // Μετατόπιση pointer ώστε το [-1] να είναι έγκυρο
+        directory_offsets_[-1] = 0;  // Δείχνει στην αρχή της αποθήκευσης των tuples
         
         bloom_filters_.assign(dir_size_, 0);
 
@@ -85,9 +85,9 @@ public:
     void reserve(std::size_t tuples_capacity) {
         tuples_.reserve(tuples_capacity);
 
-        // Performance-oriented directory sizing:
-        // Keep directory power-of-two, but cap it to avoid massive memory and slow clears.
-        // Target average bucket length around ~8.
+        // Βελτιστοποίηση μεγέθους directory για απόδοση:
+        // Διατηρείται δύναμη του 2, αλλά περιορίζεται για να αποφευχθεί υπερβολική μνήμη και αργές εκκαθαρίσεις.
+        // Στόχος: μέσο μήκος bucket περίπου 8.
         constexpr std::size_t kMinDirSize = 1ull << 10; // 1024
         constexpr std::size_t kMaxDirSize = 1ull << 18; // 262,144
         constexpr std::size_t kTargetBucket = 8;
@@ -107,7 +107,7 @@ public:
             dir_size_ = desired;
             dir_mask_ = dir_size_ - 1;
 
-            // Recalculate shift
+            // Επαναϋπολογισμός του shift
             std::size_t bits = 0;
             std::size_t tmp = dir_size_;
             while (tmp > 1) { bits++; tmp >>= 1; }
@@ -129,13 +129,13 @@ public:
      * Υλοποίηση του Σχήματος 2 (Figure 2) από την εκφώνηση:
      * 
      * 1. Υπολογισμός hash για κάθε tuple
-     * 2. Count: Μέτρηση tuples ανά directory slot (lines 4-8)
-     * 3. Prefix Sum: Υπολογισμός offsets (lines 10-18)
-     * 4. Copy: Αντιγραφή tuples στη σωστή θέση (lines 19-24)
-     * 5. Bloom: Ενημέρωση bloom filters
+     * 2. Μέτρηση tuples ανά θέση directory (γραμμές 4-8)
+     * 3. Υπολογισμός offsets (prefix sum, γραμμές 10-18)
+     * 4. Αντιγραφή tuples στη σωστή θέση (γραμμές 19-24)
+     * 5. Ενημέρωση bloom filters
      */
     void build_from_entries(const std::vector<Contest::HashEntry<Key>>& entries) {
-        // Mode selection: STRICT uses partition build, OPTIMIZED uses simple build
+        // Επιλογή λειτουργίας: STRICT χρησιμοποιεί partition build, OPTIMIZED απλό build
         if (Contest::use_strict_project() &&
             entries.size() >= required_partition_build_min_rows()) {
             build_from_entries_partitioned_parallel(entries);
@@ -148,13 +148,13 @@ public:
             return;
         }
 
-        // Reset directory state (bloom bits + offsets).
+        // Επαναφορά κατάστασης directory (bloom bits + offsets)
         std::fill(directory_offsets_, directory_offsets_ + dir_size_, 0);
         std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
 
         // ===============================================================
-        // PHASE 1: COUNT - Μέτρηση tuples ανά directory slot
-        // (Figure 2, lines 4-8)
+        // ΦΑΣΗ 1: COUNT - Μέτρηση tuples ανά θέση directory
+        // (Σχήμα 2, γραμμές 4-8)
         // ===============================================================
         if (counts_.size() != dir_size_) counts_.assign(dir_size_, 0);
         else std::fill(counts_.begin(), counts_.end(), 0);
@@ -163,67 +163,66 @@ public:
             uint64_t h = compute_hash(entries[i].key);
             std::size_t slot = (h >> shift_) & dir_mask_;
             
-            // Count (line 6)
+            // Μέτρηση (γραμμή 6)
             counts_[slot]++;
             
-            // Bloom filter (line 7)
+            // Bloom filter (γραμμή 7)
             bloom_filters_[slot] |= Bloom::make_tag_from_hash(h);
         }
 
         // ===============================================================
-        // PHASE 2: PREFIX SUM - Υπολογισμός offsets
-        // (Figure 2, lines 10-18)
-        // PDF Requirement 8.2: Directory entries store END pointers
+        // ΦΑΣΗ 2: PREFIX SUM - Υπολογισμός offsets
+        // (Σχήμα 2, γραμμές 10-18)
+        // Απαίτηση PDF 8.2: Τα entries του directory αποθηκεύουν END pointers
         // ===============================================================
         
         // Inclusive prefix sum (END pointers)
-        // directory_offsets_[i] = cumulative count of tuples through slot i (END of slot i)
-        // Range for slot i: [directory_offsets_[i-1], directory_offsets_[i])
+        // directory_offsets_[i] = αθροιστικός αριθμός tuples μέχρι το slot i (END του slot i)
+        // Εύρος για το slot i: [directory_offsets_[i-1], directory_offsets_[i])
         uint32_t cumulative = 0;
         for (std::size_t i = 0; i < dir_size_; ++i) {
             cumulative += counts_[i];
             directory_offsets_[i] = cumulative;  // END pointer
         }
-        // Note: directory_offsets_[-1] = 0 (start of storage, set in constructor)
+        // Σημείωση: directory_offsets_[-1] = 0 (αρχή αποθήκευσης, ορίζεται στον constructor)
 
         // ===============================================================
-        // PHASE 3: ALLOCATE - Δέσμευση μνήμης για tuples
+        // ΦΑΣΗ 3: ALLOCATE - Δέσμευση μνήμης για tuples
         // ===============================================================
         tuples_.assign(cumulative, entry_type{});
 
         // ===============================================================
-        // PHASE 4: COPY - Αντιγραφή tuples στη σωστή θέση
-        // (Figure 2, lines 19-24)
+        // ΦΑΣΗ 4: COPY - Αντιγραφή tuples στη σωστή θέση
+        // (Σχήμα 2, γραμμές 19-24)
         // ===============================================================
         
-        // Write pointers: START of each slot (previous entry's END)
+        // Δείκτες εγγραφής: Αρχή κάθε slot (END του προηγούμενου entry)
         if (write_ptrs_.size() != dir_size_) write_ptrs_.assign(dir_size_, 0);
-        write_ptrs_[0] = 0;  // First slot starts at 0
+        write_ptrs_[0] = 0;  // Το πρώτο slot ξεκινά από το 0
         for (std::size_t i = 1; i < dir_size_; ++i) {
-            write_ptrs_[i] = directory_offsets_[i - 1];  // Start = previous END
+            write_ptrs_[i] = directory_offsets_[i - 1];  // Αρχή = προηγούμενο END
         }
 
         for (std::size_t i = 0; i < entries.size(); ++i) {
             uint64_t h = compute_hash(entries[i].key);
             std::size_t slot = (h >> shift_) & dir_mask_;
             
-            // Βρες την επόμενη διαθέσιμη θέση για αυτό το slot (line 20-21)
+            // Βρες την επόμενη διαθέσιμη θέση για αυτό το slot (γραμμές 20-21)
             uint32_t pos = write_ptrs_[slot]++;
             
-            // Γράψε το tuple (line 22)
+            // Γράψε το tuple (γραμμή 22)
             tuples_[pos].key = entries[i].key;
             tuples_[pos].row_id = entries[i].row_id;
         }
         
-        // Τώρα τα tuples είναι sorted by hash prefix και contiguous!
+        // Τώρα τα tuples είναι ταξινομημένα κατά hash prefix και συνεχόμενα στη μνήμη!
     }
 
-    // Fast path: build directly from a zero-copy INT32 column (no nulls) without materializing
-    // an intermediate vector of (key,row_id) pairs.
+    // Γρήγορη διαδρομή: κατασκευή απευθείας από zero-copy INT32 στήλη (χωρίς nulls) χωρίς ενδιάμεσο vector (key,row_id)
     void build_from_zero_copy_int32(const Column* src_column,
                                     const std::vector<std::size_t>& page_offsets,
                                     std::size_t num_rows) {
-        // Mode selection: STRICT uses partition build, OPTIMIZED uses simple build
+        // Επιλογή λειτουργίας: STRICT χρησιμοποιεί partition build, OPTIMIZED απλό build
         if (Contest::use_strict_project() &&
             num_rows >= required_partition_build_min_rows()) {
             build_from_zero_copy_int32_partitioned_parallel(src_column, page_offsets, num_rows);
@@ -241,7 +240,7 @@ public:
 
         tuples_.reserve(num_rows);
 
-        // Reset directory state (bloom bits + offsets).
+        // Επαναφορά κατάστασης directory (bloom bits + offsets)
         std::fill(directory_offsets_, directory_offsets_ + dir_size_, 0);
         std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
 
@@ -249,7 +248,7 @@ public:
         else std::fill(counts_.begin(), counts_.end(), 0);
 
         const std::size_t npages = page_offsets.size() - 1;
-        // PHASE 1: count + bloom
+        // ΦΑΣΗ 1: count + bloom
         for (std::size_t page_idx = 0; page_idx < npages; ++page_idx) {
             const std::size_t base = page_offsets[page_idx];
             const std::size_t end = page_offsets[page_idx + 1];
@@ -265,17 +264,17 @@ public:
             }
         }
 
-        // PHASE 2: prefix sums (END pointer semantics)
+        // ΦΑΣΗ 2: prefix sums (END pointer semantics)
         uint32_t cumulative = 0;
         for (std::size_t i = 0; i < dir_size_; ++i) {
             cumulative += counts_[i];
             directory_offsets_[i] = cumulative;  // END pointer
         }
 
-        // PHASE 3: allocate tuples
+        // ΦΑΣΗ 3: allocate tuples
         tuples_.assign(cumulative, entry_type{});
 
-        // PHASE 4: write tuples (write pointers are START = previous END)
+        // ΦΑΣΗ 4: write tuples (οι δείκτες εγγραφής είναι ΑΡΧΗ = προηγούμενο END)
         if (write_ptrs_.size() != dir_size_) write_ptrs_.assign(dir_size_, 0);
         write_ptrs_[0] = 0;
         for (std::size_t i = 1; i < dir_size_; ++i) write_ptrs_[i] = directory_offsets_[i - 1];
@@ -300,27 +299,27 @@ public:
     /*
      * probe():
      * 
-     * ΒΕΛΤΙΩΜΕΝΗ ΕΚΔΟΣΗ με END pointer semantics (PDF requirement 8.2):
-     * - Directory stores END pointers
-     * - Range: [directory_offsets_[slot-1], directory_offsets_[slot])
-     * - directory_offsets_[-1] = 0 (start of storage)
-     * - Instant O(1) range calculation
-     * - No pointer chasing
-     * - Cache-friendly sequential scan
+     * Βελτιωμένη έκδοση με END pointer semantics (απαίτηση PDF 8.2):
+     * - Ο directory αποθηκεύει END pointers
+     * - Εύρος: [directory_offsets_[slot-1], directory_offsets_[slot])
+     * - directory_offsets_[-1] = 0 (αρχή αποθήκευσης)
+     * - Άμεσος υπολογισμός εύρους O(1)
+     * - Χωρίς pointer chasing
+     * - Φιλικό προς την cache (sequential scan)
      */
     const entry_type* probe(const Key& key, std::size_t& len) const {
         uint64_t h = compute_hash(key);
         std::size_t slot = (h >> shift_) & dir_mask_;
 
-        // Bloom filter rejection (πολύ φθηνό)
+        // Απόρριψη μέσω bloom filter (πολύ φθηνό)
         uint16_t tag = Bloom::make_tag_from_hash(h);
         if (!Bloom::maybe_contains(bloom_filters_[slot], tag)) {
             len = 0;
             return nullptr;
         }
 
-        // INSTANT range calculation (NO BRANCHING)
-        // Range: [previous END, current END)
+        // Άμεσος υπολογισμός εύρους (χωρίς διακλαδώσεις)
+        // Εύρος: [προηγούμενο END, τρέχον END)
         uint32_t begin = (slot == 0) ? 0 : directory_offsets_[slot - 1];
         uint32_t end = directory_offsets_[slot];
         
@@ -330,12 +329,12 @@ public:
             return nullptr;
         }
 
-        // Return pointer to contiguous range
+        // Επιστροφή pointer σε συνεχόμενο εύρος
         return &tuples_[begin];
     }
 
     static std::size_t required_partition_build_min_rows() {
-        // Env vars not used anymore; always apply required algorithm when STRICT.
+        // Οι μεταβλητές περιβάλλοντος δεν χρησιμοποιούνται πλέον· πάντα εφαρμόζεται ο απαιτούμενος αλγόριθμος όταν STRICT.
         return std::size_t(0);
     }
 
@@ -352,7 +351,7 @@ public:
         Contest::chunklist_push<Key>(list, e, alloc);
     }
 
-    // Required algorithm: phase-based partition -> gather/count -> prefix sums -> one-writer-per-partition copy.
+    // Απαιτούμενος αλγόριθμος: partition ανά φάση -> συλλογή/μέτρηση -> prefix sums -> αντιγραφή με έναν writer ανά partition.
     void build_from_entries_partitioned_parallel(const std::vector<Contest::HashEntry<Key>>& entries) {
         if (entries.empty()) {
             std::fill(directory_offsets_, directory_offsets_ + dir_size_, 0);
@@ -366,12 +365,12 @@ public:
         const std::size_t n = entries.size();
         const std::size_t nthreads = (n < 2048) ? 1 : hw;
 
-        // Phase 1: partition into per-thread chunk lists (per directory slot).
+        // Φάση 1: partition σε λίστες chunk ανά thread (ανά θέση directory)
         std::vector<std::vector<ChunkList>> lists(nthreads, std::vector<ChunkList>(dir_size_));
-        // 3-Level Slab Allocator:
-        // Level 1: Global (via operator new in TempAlloc)
-        // Level 2: Thread-local allocator (one TempAlloc per thread)
-        // Level 3: Partition chunks (allocated from thread's TempAlloc)
+        // 3-Επίπεδος Slab Allocator:
+        // Επίπεδο 1: Global (μέσω operator new στο TempAlloc)
+        // Επίπεδο 2: Thread-local allocator (ένα TempAlloc ανά thread)
+        // Επίπεδο 3: Partition chunks (δεσμεύονται από το TempAlloc του thread)
         std::vector<std::unique_ptr<TempAlloc>> allocs;
         allocs.reserve(nthreads);
         for (std::size_t t = 0; t < nthreads; ++t) {
@@ -388,19 +387,19 @@ public:
             if (begin >= end) break;
             threads.emplace_back([&, t, begin, end]() {
                 auto& my_lists = lists[t];
-                TempAlloc& my_alloc = *allocs[t];  // One allocator per thread
+                TempAlloc& my_alloc = *allocs[t];  // Ένας allocator ανά thread
                 for (std::size_t i = begin; i < end; ++i) {
                     const uint64_t h = compute_hash(entries[i].key);
                     const std::size_t slot = (h >> shift_) & dir_mask_;
                     const uint16_t tag = Bloom::make_tag_from_hash(h);
-                    // Allocate partition chunks from thread-local allocator
+                    // Δέσμευση partition chunks από τον thread-local allocator
                     chunklist_push(my_lists[slot], TmpEntry{entries[i].key, entries[i].row_id, tag}, my_alloc);
                 }
             });
         }
         for (auto& th : threads) th.join();
 
-        // Phase 2: one-writer-per-partition counts and blooms.
+        // Φάση 2: ένας writer ανά partition για counts και blooms
         if (counts_.size() != dir_size_) counts_.assign(dir_size_, 0);
         else std::fill(counts_.begin(), counts_.end(), 0);
         std::fill(bloom_filters_.begin(), bloom_filters_.end(), 0);
@@ -425,7 +424,7 @@ public:
         }
         for (auto& th : threads) th.join();
 
-        // Prefix sums (serial; barrier already happened) - END pointer semantics
+        // Prefix sums (σειριακά, το barrier έχει ήδη γίνει) - END pointer semantics
         uint32_t cumulative = 0;
         for (std::size_t i = 0; i < dir_size_; ++i) {
             cumulative += counts_[i];
@@ -434,12 +433,12 @@ public:
 
         tuples_.assign(cumulative, entry_type{});
 
-        // Phase 3: one-writer-per-partition copy.
+        // Φάση 3: ένας writer ανά partition για την αντιγραφή
         threads.clear();
         for (std::size_t t = 0; t < workers; ++t) {
             threads.emplace_back([&, t]() {
                 for (std::size_t slot = t; slot < dir_size_; slot += workers) {
-                    // Start position = previous END (or 0 for first slot)
+                    // Θέση εκκίνησης = προηγούμενο END (ή 0 για το πρώτο slot)
                     uint32_t pos = (slot == 0) ? 0 : directory_offsets_[slot - 1];
                     for (std::size_t src = 0; src < nthreads; ++src) {
                         for (Chunk* ch = lists[src][slot].head; ch; ch = ch->next) {
@@ -470,7 +469,7 @@ public:
         if (!hw) hw = 4;
         const std::size_t nthreads = (num_rows < 2048) ? 1 : hw;
         std::vector<std::vector<ChunkList>> lists(nthreads, std::vector<ChunkList>(dir_size_));
-        // 3-Level Slab Allocator (same as build_from_entries_partitioned_parallel)
+        // 3-Επίπεδος Slab Allocator (όπως στο build_from_entries_partitioned_parallel)
         std::vector<std::unique_ptr<TempAlloc>> allocs;
         allocs.reserve(nthreads);
         for (std::size_t t = 0; t < nthreads; ++t) {
@@ -487,9 +486,9 @@ public:
             if (begin_row >= end_row) break;
             threads.emplace_back([&, t, begin_row, end_row]() {
                 auto& my_lists = lists[t];
-                TempAlloc& my_alloc = *allocs[t];  // One allocator per thread
+                TempAlloc& my_alloc = *allocs[t];  // Ένας allocator ανά thread
 
-                // Find starting page by binary search.
+                // Εύρεση αρχικής σελίδας με δυαδική αναζήτηση
                 std::size_t page_idx = 0;
                 if (begin_row >= page_offsets[1]) {
                     std::size_t left = 0, right = page_offsets.size() - 1;
@@ -518,7 +517,7 @@ public:
                     const uint64_t h = compute_hash(key);
                     const std::size_t slot = (h >> shift_) & dir_mask_;
                     const uint16_t tag = Bloom::make_tag_from_hash(h);
-                    // Allocate partition chunks from thread-local allocator
+                    // Δέσμευση partition chunks από τον thread-local allocator
                     chunklist_push(my_lists[slot], TmpEntry{key, static_cast<uint32_t>(row), tag}, my_alloc);
                 }
             });
@@ -561,7 +560,7 @@ public:
         for (std::size_t t = 0; t < workers; ++t) {
             threads.emplace_back([&, t]() {
                 for (std::size_t slot = t; slot < dir_size_; slot += workers) {
-                    // Start position = previous END (or 0 for first slot)
+                    // Θέση εκκίνησης = προηγούμενο END (ή 0 για το πρώτο slot)
                     uint32_t pos = (slot == 0) ? 0 : directory_offsets_[slot - 1];
                     for (std::size_t src = 0; src < nthreads; ++src) {
                         for (Chunk* ch = lists[src][slot].head; ch; ch = ch->next) {
@@ -578,11 +577,11 @@ public:
         for (auto& th : threads) th.join();
     }
 
-    // Removed unused probe_exact() helper (not referenced anywhere)
+    // Αφαιρέθηκε το αχρησιμοποίητο probe_exact() helper (δεν χρησιμοποιείται πουθενά)
 
     std::size_t size() const { return tuples_.size(); }
     
-    // Debugging helpers
+    // Βοηθητικές συναρτήσεις για debugging
     std::size_t directory_size() const { return dir_size_; }
     std::size_t memory_usage() const {
         return tuples_.size() * sizeof(entry_type) +

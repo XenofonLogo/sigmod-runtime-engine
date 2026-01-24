@@ -19,13 +19,13 @@ WorkStealingCoordinator::WorkStealingCoordinator(const WorkStealingConfig& confi
 }
 
 bool WorkStealingCoordinator::steal_block(size_t& begin, size_t& end) {
-    // Try to steal a block of work
+    // Προσπαθεί να "κλέψει" ένα block εργασίας (atomic increment)
     begin = work_counter_.fetch_add(block_size_, std::memory_order_acquire);
-    
+    // Αν δεν υπάρχει άλλο work, επιστρέφει false
     if (begin >= total_work_) {
-        return false;  // All work is done
+        return false;  // Όλη η εργασία έχει ολοκληρωθεί
     }
-    
+    // Υπολογίζει το τέλος του block
     end = std::min(total_work_, begin + block_size_);
     return true;
 }

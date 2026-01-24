@@ -32,6 +32,7 @@ struct JoinAlgorithm {
     size_t left_col, right_col;                          // Join column indices
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;  // Output schema
 
+    // Εκτελεί το join για INT32 κλειδιά
     void run_int32() {
         using Key = int32_t;
 
@@ -44,7 +45,7 @@ struct JoinAlgorithm {
 
         const auto &build_col = build_buf->columns[build_key_col];
 
-        // BUILD PHASE: prefer zero-copy INT32 pages (no NULLs)
+        // BUILD PHASE: Προτιμά zero-copy INT32 pages (χωρίς NULLs)
         const bool can_build_from_pages = build_col.is_zero_copy && build_col.src_column != nullptr &&
                                           build_col.page_offsets.size() >= 2;
 
@@ -52,11 +53,12 @@ struct JoinAlgorithm {
         size_t build_rows_effective = 0;
 
         if (can_build_from_pages) {
+            // Αν γίνεται, χτίζει το hash table απευθείας από τις σελίδες (χωρίς αντιγραφή)
             const bool built = table->build_from_zero_copy_int32(build_col.src_column,
                                                                 build_col.page_offsets,
                                                                 build_buf->num_rows);
             if (!built) {
-                // Fall back to the old entries path if the table doesn't support it.
+                // Αν δεν υποστηρίζεται, fallback σε υλοποίηση με αντιγραφή
                 entries.reserve(build_buf->num_rows);
                 for (size_t i = 0; i < build_buf->num_rows; ++i) {
                     const value_t &v = build_col.pages[i / build_col.values_per_page][i % build_col.values_per_page];
@@ -72,6 +74,7 @@ struct JoinAlgorithm {
                 build_rows_effective = build_buf->num_rows;
             }
         } else {
+            // Υλοποίηση με αντιγραφή (για NULLs ή μη zero-copy)
             entries.reserve(build_buf->num_rows);
             for (size_t i = 0; i < build_buf->num_rows; ++i) {
                 const value_t &v = build_col.pages[i / build_col.values_per_page][i % build_col.values_per_page];
