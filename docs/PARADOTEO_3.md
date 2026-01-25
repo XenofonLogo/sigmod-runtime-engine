@@ -140,29 +140,31 @@ struct ColumnData {
 ```cpp
 void parallel_for_work_stealing(size_t total_items,
                                 const std::function<void(size_t, size_t)>& task) {
-    const size_t nthreads = get_num_threads();
-    
+    size_t nthreads = std::thread::hardware_concurrency();
+    if (!nthreads) nthreads = 4;  // Fallback
+
+    // Allow override via FORCE_THREADS (experiment knob)
+    if (const char* env = std::getenv("FORCE_THREADS")) {
+        if (*env) nthreads = static_cast<size_t>(std::atoi(env));
+    }
+
     // Atomic counter for work stealing
     std::atomic<size_t> next_item{0};
-    
+
     // Launch worker threads
     std::vector<std::thread> threads;
     threads.reserve(nthreads);
-    
+
     for (size_t tid = 0; tid < nthreads; ++tid) {
         threads.emplace_back([&, tid]() {
             while (true) {
-                // Atomic fetch-and-add: lock-free work stealing
                 size_t item = next_item.fetch_add(1, std::memory_order_relaxed);
-                
                 if (item >= total_items) break;
-                
-                task(tid, item);  // Execute work item
+                task(tid, item);
             }
         });
     }
-    
-    // Synchronization: join all threads (no locks needed)
+
     for (auto& t : threads) {
         if (t.joinable()) t.join();
     }
@@ -173,6 +175,7 @@ void parallel_for_work_stealing(size_t total_items,
 - ✅ Χωρίς mutexes (χρήση `std::atomic`)
 - ✅ Lock-free work distribution
 - ✅ Συγχρονισμός με `pthread_join` (μέσω `thread::join()`)
+- ✅ Runtime override μέσω `FORCE_THREADS` για πειράματα
 
 ### 2.4 Φάσεις Παραλληλοποίησης
 
@@ -374,72 +377,46 @@ Per-tuple allocation within slab blocks
 
 ### 4.3 Υλοποίηση
 
-#### Αρχείο: [include/slab_allocator.h](include/slab_allocator.h#L15-L80)
+#### Αρχείο: [include/slab_allocator.h](include/slab_allocator.h)
 
 ```cpp
-template <typename T>
-class SlabAllocator {
-private:
-    static constexpr size_t DEFAULT_BLOCK_SIZE = 1 << 20;  // 1 MB
-    
-    struct Block {
-        std::vector<T> data;
-        size_t used = 0;
-        
-        Block(size_t capacity) : data(capacity) {}
-    };
-    
-    std::vector<std::unique_ptr<Block>> blocks_;
-    size_t current_block_ = 0;
-    size_t block_capacity_;
+// 3-επίπεδος slab allocator για STRICT build
+// Επίπεδο 1: global blocks (operator new)
+// Επίπεδο 2: per-thread slabs (1MB)
+// Επίπεδο 3: per-partition arenas
 
-public:
-    SlabAllocator(size_t block_size = DEFAULT_BLOCK_SIZE) 
-        : block_capacity_(block_size / sizeof(T)) {
-        allocate_new_block();
-    }
-    
-    T* allocate(size_t n = 1) {
-        Block* current = blocks_[current_block_].get();
-        
-        // Check if current block has space
-        if (current->used + n > current->data.size()) {
-            allocate_new_block();
-            current = blocks_[current_block_].get();
-        }
-        
-        T* ptr = &current->data[current->used];
-        current->used += n;
-        return ptr;
-    }
-    
-private:
-    void allocate_new_block() {
-        blocks_.push_back(std::make_unique<Block>(block_capacity_));
-        current_block_ = blocks_.size() - 1;
-    }
+struct PartitionArena {
+    std::byte* current;
+    size_t remaining;
+    std::vector<void*> owned_blocks;
+    SlabAllocator* parent;
+    void* alloc(std::size_t bytes, std::size_t align);
+};
+
+struct SlabAllocator {
+    static constexpr size_t SLAB_SIZE = 1 << 20; // 1MB
+    static constexpr size_t DEFAULT_PARTITIONS = 64; // βέλτιστο από μετρήσεις
+    static size_t get_num_partitions(); // env override: NUM_PARTITIONS_OVERRIDE
+
+    std::vector<void*> slabs;   // Επίπεδο 1
+    std::byte* current;         // Επίπεδο 2 write ptr
+    size_t remaining;           // Επίπεδο 2 υπόλοιπο
+    PartitionArena partitions[DEFAULT_PARTITIONS]; // Επίπεδο 3
+
+    void* alloc(std::size_t bytes, std::size_t align);      // Επίπεδο 2
+    PartitionArena& get_partition_arena(size_t partition_id); // Επίπεδο 3
 };
 ```
 
 #### Χρήση στο Partition Build
 
 ```cpp
-// Thread-local slab allocators
-std::vector<SlabAllocator<HashEntry<Key>>> thread_slabs(nthreads);
+// PHASE 1: partitioning με thread-local slab + per-partition arena
+SlabAllocator thread_slab;                          // per-thread
+PartitionArena& arena = thread_slab.get_partition_arena(slot); // per-partition
+chunklist_push_from_partition(..., arena);          // allocations χωρίς locks
 
-// Each thread allocates to its own slab
-parallel_for_work_stealing(num_entries, 
-    [&](size_t tid, size_t i) {
-        const auto& e = entries[i];
-        const size_t slot = hash_to_directory(e.key);
-        
-        // Allocate from thread-local slab (no contention)
-        HashEntry<Key>* entry = thread_slabs[tid].allocate();
-        *entry = e;
-        
-        // Add to partition
-        thread_partitions[tid][slot].push_back(entry);
-    });
+// PHASE 2: merge ανά slot σε continuous buffer (tuples ήδη slab-allocated)
 ```
 
 ### 4.4 Διάγραμμα Memory Layout

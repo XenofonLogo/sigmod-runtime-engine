@@ -10,6 +10,7 @@
 6. [Zero-Copy Build & Probe](#6-zero-copy-build--probe)
 7. [Batch Output & Preallocation](#7-batch-output--preallocation)
 8. [Σύνοψη Performance](#8-σύνοψη-performance)
+9. [Runtime Settings & Telemetry](#9-runtime-settings--telemetry)
 
 ---
 
@@ -86,8 +87,8 @@
 ### 2.2 Work-Stealing Parallelization
 
 **Διαφορά:** 
-- STRICT: Work-stealing στη merge phase
-- OPTIMIZED: Work-stealing στο probe phase (adaptive)
+- STRICT: Work-stealing στο probe (ίδια διαδρομή με OPTIMIZED). Το build παραμένει partitioned με στατικά splits, όχι work-stealing.
+- OPTIMIZED: Work-stealing στο probe (adaptive threshold, σε 1 thread για μικρά inputs ή FORCE_THREADS για πειράματα).
 
 **Λεπτομέρειες:** Βλ. [PARADOTEO_3.md §7](PARADOTEO_3.md#7-work-stealing)
 
@@ -499,55 +500,51 @@ void append(int32_t value) {
 
 #### Βελτιστοποιημένη Υλοποίηση
 
-**Αρχείο:** [src/execute_default.cpp:232-280](src/execute_default.cpp#L232-L280)
+**Αρχείο:** [src/execute_default.cpp:190-360](src/execute_default.cpp#L190-L360)
 
 ```cpp
-// THREE-PHASE OUTPUT STRATEGY
+// Μετά το probe (per-thread vectors)
+size_t total_out = 0;
+for (auto& v : out_by_thread) total_out += v.size();
+if (total_out == 0) return;
 
-// PHASE 1: COUNT - Determine total output size
-size_t total_matches = 0;
-for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
-    const int32_t* keys = page_data[page_idx];
-    const size_t page_rows = page_sizes[page_idx];
-    
-    for (size_t i = 0; i < page_rows; ++i) {
-        size_t match_count = 0;
-        hashtable.probe(keys[i], &match_count);
-        total_matches += match_count;
+// Phase 1: Single allocation για όλες τις στήλες εξόδου
+const size_t num_output_cols = output_attrs.size();
+for (size_t col = 0; col < num_output_cols; ++col) {
+    auto& dst = results.columns[col];
+    dst.pages.clear();
+    dst.page_offsets.clear();
+    dst.num_values = total_out;
+
+    const size_t page_sz = dst.values_per_page; // fixed (1024)
+    size_t written = 0;
+    while (written < total_out) {
+        const size_t take = std::min(page_sz, total_out - written);
+        dst.pages.emplace_back(take); // one-time allocation
+        written += take;
     }
 }
 
-// PHASE 2: PREALLOCATE - Reserve exact space needed
-output_columns[0].reserve_exact(total_matches);  // Build row IDs
-output_columns[1].reserve_exact(total_matches);  // Probe row IDs
-
-// Pre-allocate pages (one-time allocation)
-const size_t pages_needed = (total_matches + VALUES_PER_PAGE - 1) 
-                           / VALUES_PER_PAGE;
-output_columns[0].allocate_pages(pages_needed);
-output_columns[1].allocate_pages(pages_needed);
-
-// PHASE 3: FILL - Direct write with index
+// Phase 2: Γέμισμα των allocated σελίδων
 size_t out_idx = 0;
-for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
-    const int32_t* keys = page_data[page_idx];
-    const size_t page_rows = page_sizes[page_idx];
-    const size_t base_row = page_offsets[page_idx];
-    
-    for (size_t i = 0; i < page_rows; ++i) {
-        size_t match_count = 0;
-        const auto* matches = hashtable.probe(keys[i], &match_count);
-        
-        // Direct write to pre-allocated space
-        for (size_t m = 0; m < match_count; ++m) {
-            output_columns[0].write_at_index(out_idx, matches[m].row_id);
-            output_columns[1].write_at_index(out_idx, base_row + i);
-            ++out_idx;
+for (size_t t = 0; t < nthreads; ++t) {
+    for (const auto& op : out_by_thread[t]) {
+        const size_t lidx = op.lidx;
+        const size_t ridx = op.ridx;
+
+        const size_t page_idx = out_idx / out_page_sz;
+        const size_t off = out_idx % out_page_sz;
+
+        for (size_t col = 0; col < num_output_cols; ++col) {
+            const auto m = out_map[col];
+            if (m.from_left)
+                results.columns[col].pages[page_idx][off] = left.columns[m.idx].get(lidx);
+            else
+                results.columns[col].pages[page_idx][off] = right.columns[m.idx].get(ridx);
         }
+        ++out_idx;
     }
 }
-
-// Assert: out_idx == total_matches (perfect sizing)
 ```
 
 ### 5.3 Διάγραμμα: Output Strategy Comparison
@@ -565,50 +562,17 @@ For each match:
 │   ├─ Potential resize     ◄─── Copy old data
 │   └─ Write value
 │
-Timeline per 1000 matches:
-[Check][Write][Check][Write][Check][ALLOC!][COPY!][Write]...
-                                     └─────┘ └────┘
-                                     Stalls  Memory BW
-
-Total: ~1000 checks + ~5-10 allocations
+Total: πολλά boundary/reserve checks + reallocations
 
 
-OPTIMIZED (Count-Preallocate-Fill):
-═══════════════════════════════════
+OPTIMIZED (Local vectors → single alloc → fill):
+═══════════════════════════════════════════════
 
-PHASE 1 (COUNT):
-┌─────────────┐
-│ Scan all    │
-│ matches     │ Count: 1,234,567 matches
-└──────┬──────┘
-       │
-PHASE 2 (PREALLOCATE):
-       │
-┌──────▼──────────────┐
-│ Allocate exactly    │
-│ 1,234,567 slots     │ ◄─── ONE allocation
-│                     │
-│ Page 0: [........]  │
-│ Page 1: [........]  │
-│ Page 2: [........]  │
-│   ...               │
-│ Page N: [........]  │
-└──────┬──────────────┘
-       │
-PHASE 3 (FILL):
-       │
-┌──────▼──────────────┐
-│ Direct write by     │
-│ index (no checks)   │ ◄─── Zero overhead
-│                     │
-│ out[0] = val0       │
-│ out[1] = val1       │
-│ out[2] = val2       │
-│   ...               │
-│ out[1234567] = valN │
-└─────────────────────┘
+PHASE 0: Probe → push σε per-thread vectors (reserve upfront)
+PHASE 1: Υπολογισμός total_out, one-shot allocation των output pages
+PHASE 2: Γέμισμα από τα per-thread vectors με direct indexing
 
-Total: 0 checks + 1 allocation
+Total: μία κατανομή για τις σελίδες εξόδου, χωρίς per-row reallocs
 ```
 
 ### 5.4 Memory Layout Comparison
@@ -744,35 +708,50 @@ parallel_for(num_partitions, [&](size_t tid, size_t part_idx) {
 
 #### OPTIMIZED Mode: Single-Pass Build (Απλό)
 
-**Στρατηγική:** Απευθείας εισαγωγή από pages στο hashtable, χωρίς partitions.
+**Στρατηγική:** Απευθείας εισαγωγή από pages στο hashtable, χωρίς partitions, σε 1 thread (σειριακό).
 
 ```cpp
-// SINGLE PHASE: Direct insert from pages
-void build_from_zero_copy_int32_simple_parallel(
+// SINGLE PHASE: Direct insert from pages (sequential)
+void build_from_zero_copy_int32(
     const Column* src_column,
     const std::vector<size_t>& page_offsets,
     size_t num_rows) {
-    
+
     const size_t num_pages = page_offsets.size() - 1;
-    
-    // Pre-allocate hashtable (one-time)
-    reserve(num_rows);
-    
-    // Parallel page processing
-    parallel_for_work_stealing(num_pages, 
-        [&](size_t tid, size_t page_idx) {
-            const Page* page = src_column->get_page(page_idx);
-            const int32_t* data = extract_int32_data(page);
-            
-            const size_t start_row = page_offsets[page_idx];
-            const size_t end_row = page_offsets[page_idx + 1];
-            const size_t page_rows = end_row - start_row;
-            
-            // Direct insert (thread-safe hashtable)
-            for (size_t i = 0; i < page_rows; ++i) {
-                insert_direct(data[i], start_row + i);
-            }
-        });
+
+    reserve(num_rows);                  // Προ-δέσμευση hashtable
+
+    // Pass 1: count + bloom per slot
+    for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
+        auto* page = src_column->get_page(page_idx);
+        const int32_t* data = extract_int32_data(page);
+        const size_t start_row = page_offsets[page_idx];
+        const size_t end_row = page_offsets[page_idx + 1];
+        for (size_t i = 0; i < end_row - start_row; ++i) {
+            const uint64_t h = hasher(data[i]);
+            const size_t slot = (h >> shift) & dir_mask;
+            counts[slot]++;
+            bloom[slot] |= Bloom::make_tag_from_hash(h);
+        }
+    }
+
+    // Pass 2: prefix sums + fill tuples
+    prefix_sums_into(directory_offsets, counts);
+    allocate_tuples(total_count);
+    reset_write_ptrs(directory_offsets);
+
+    for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
+        auto* page = src_column->get_page(page_idx);
+        const int32_t* data = extract_int32_data(page);
+        const size_t start_row = page_offsets[page_idx];
+        const size_t end_row = page_offsets[page_idx + 1];
+        for (size_t i = 0; i < end_row - start_row; ++i) {
+            const uint64_t h = hasher(data[i]);
+            const size_t slot = (h >> shift) & dir_mask;
+            const uint32_t pos = write_ptrs[slot]++;
+            tuples[pos] = {data[i], static_cast<uint32_t>(start_row + i)};
+        }
+    }
 }
 ```
 
@@ -886,5 +865,23 @@ INPUT
 
 OUTPUT
 ```
+
+
+## 9. Runtime Settings & Telemetry
+
+**ENV switches**
+- FORCE_THREADS: Override του πλήθους threads για work-stealing (STRICT/OPTIMIZED). Default: hardware_concurrency. Χρήσιμο για πειράματα ή σταθερές αναπαραγωγές.
+- NUM_PARTITIONS_OVERRIDE: Προβλεπόμενο override των partitions του STRICT slab allocator. Σήμερα δεν χρησιμοποιείται στον κώδικα· οι partitions είναι σταθερά 64 (NUM_PARTITIONS).
+- JOIN_TELEMETRY: Ενεργοποιεί εκτύπωση στατιστικών σε stderr. Χρήση: `JOIN_TELEMETRY=1 ./build/fast plans.json`. Εκθέτει join counts, bytes estimates, και θεωρητικά bandwidth lower bounds.
+
+**Defaults**
+- Threads: hardware_concurrency αν δεν υπάρχει FORCE_THREADS.
+- Partitions: σταθερά 64 (NUM_PARTITIONS) — το NUM_PARTITIONS_OVERRIDE δεν εφαρμόζεται.
+- Telemetry: Off αν JOIN_TELEMETRY λείπει ή είναι 0.
+
+**Πού κουμπώνουν**
+- Work-stealing thread selection: [PARADOTEO_3.md §7](PARADOTEO_3.md#7-work-stealing).
+- STRICT slab allocator partitions: [PARADOTEO_3.md §6](PARADOTEO_3.md#6-slab-allocator).
+- Telemetry υλοποίηση: [src/join_telemetry.cpp](src/join_telemetry.cpp) και ενσωμάτωση στο pipeline: [src/execute_default.cpp](src/execute_default.cpp).
 
 

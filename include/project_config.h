@@ -8,7 +8,7 @@
  *    - Direct zero-copy page access
  *    - No slab allocator overhead
  *    - Parallel probing with work stealing
- *    - Performance: 11.12s baseline (FAST)
+ *    - Performance: 12.1s (4 threads, IMDB workload)
  *    - Correctness: Core requirements met
  * 
  * 2. STRICT_PROJECT=1

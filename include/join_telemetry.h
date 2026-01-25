@@ -8,11 +8,11 @@ namespace Contest {
 
 // Συγκεντρωτικά μετρικά ενός query
 struct QueryTelemetry {
-    uint64_t joins = 0;          // Πλήθος joins
-    uint64_t build_rows = 0;     // Σύνολο γραμμών στην build πλευρά
-    uint64_t probe_rows = 0;     // Σύνολο γραμμών στην probe πλευρά
-    uint64_t out_rows = 0;       // Γραμμές εξόδου
-    uint64_t out_cells = 0;      // Κελιά εξόδου (rows * cols)
+    uint64_t joins = 0;            // Πλήθος joins
+    uint64_t build_rows = 0;       // Σύνολο γραμμών στην build πλευρά
+    uint64_t probe_rows = 0;       // Σύνολο γραμμών στην probe πλευρά
+    uint64_t out_rows = 0;         // Γραμμές εξόδου
+    uint64_t out_cells = 0;        // Κελιά εξόδου (rows * cols)
     uint64_t bytes_strict_min = 0; // Ελάχιστα bytes (keys + writes)
     uint64_t bytes_likely = 0;     // Εκτιμώμενα bytes (προσθήκη reads)
 };

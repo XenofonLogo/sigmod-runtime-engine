@@ -17,11 +17,16 @@
 #include "hash_common.h"
 #include "hash_functions.h"
 #include "bloom_filter.h"
-#include "three_level_slab.h"
-#include "temp_allocator.h"
+#include "slab_allocator.h"
 #include "partition_hash_builder.h"
 #include "project_config.h"
 
+namespace Contest {
+// Forward declaration για PartitionArena (ήδη δηλωμένη σε slab_allocator.h)
+struct PartitionArena;
+}
+
+namespace Contest {
 // TupleEntry: μία πλειάδα με το κλειδί και το row_id της
 template<typename Key, typename Hasher = Hash::Hasher32>
 struct TupleEntry {
@@ -280,14 +285,14 @@ public:
     using TmpEntry = Contest::TmpEntry<Key>;
     using Chunk = Contest::Chunk<Key>;
     using ChunkList = Contest::ChunkList<Key>;
-    using TempAlloc = Contest::TempAlloc;
+    using ThreadAllocator = Contest::SlabAllocator;
 
     // Βοηθοί για δέσμευση chunks και push σε λίστες
-    static inline Chunk* alloc_chunk(TempAlloc& alloc) {
+    static inline Chunk* alloc_chunk(ThreadAllocator& alloc) {
         return Contest::alloc_chunk<Key>(alloc);
     }
 
-    static inline void chunklist_push(ChunkList& list, const TmpEntry& e, TempAlloc& alloc) {
+    static inline void chunklist_push(ChunkList& list, const TmpEntry& e, ThreadAllocator& alloc) {
         Contest::chunklist_push<Key>(list, e, alloc);
     }
 
@@ -307,10 +312,10 @@ public:
 
         // Φάση 1: partitioning σε λίστες ανά thread/slot
         std::vector<std::vector<ChunkList>> lists(nthreads, std::vector<ChunkList>(dir_size_));
-        std::vector<std::unique_ptr<TempAlloc>> allocs;
+        std::vector<std::unique_ptr<ThreadAllocator>> allocs;
         allocs.reserve(nthreads);
         for (std::size_t t = 0; t < nthreads; ++t) {
-            allocs.emplace_back(std::make_unique<TempAlloc>()); // Ένας allocator ανά thread
+            allocs.emplace_back(std::make_unique<ThreadAllocator>()); // Ένας allocator ανά thread
         }
 
         const std::size_t block = (n + nthreads - 1) / nthreads; // Κατανομή εργασίας ανά block
@@ -323,13 +328,15 @@ public:
             if (begin >= end) break; // Δεν υπάρχει δουλειά για αυτό το thread
             threads.emplace_back([&, t, begin, end]() {
                 auto& my_lists = lists[t];
-                TempAlloc& my_alloc = *allocs[t]; // Τοπικός allocator
+                ThreadAllocator& my_alloc = *allocs[t]; // Επίπεδο 2: Thread-local allocator
                 for (std::size_t i = begin; i < end; ++i) {
                     const uint64_t h = compute_hash(entries[i].key);
                     const std::size_t slot = (h >> shift_) & dir_mask_;
                     const uint16_t tag = Bloom::make_tag_from_hash(h);
-                    // Καταχώριση tuple στο chunklist του αντίστοιχου slot
-                    chunklist_push(my_lists[slot], TmpEntry{entries[i].key, entries[i].row_id, tag}, my_alloc);
+                    // Επίπεδο 3: Παίρνουμε partition arena και δεσμεύουμε μνήμη γι' αυτήν
+                    PartitionArena& partition_alloc = my_alloc.get_partition_arena(slot);
+                    // Καταχώριση tuple στο chunklist του αντίστοιχου slot με per-partition allocation
+                    chunklist_push_from_partition(my_lists[slot], TmpEntry{entries[i].key, entries[i].row_id, tag}, partition_alloc);
                 }
             });
         }
@@ -409,9 +416,9 @@ public:
 
         // Λίστες ανά thread/slot + allocators
         std::vector<std::vector<ChunkList>> lists(nthreads, std::vector<ChunkList>(dir_size_));
-        std::vector<std::unique_ptr<TempAlloc>> allocs;
+        std::vector<std::unique_ptr<ThreadAllocator>> allocs;
         allocs.reserve(nthreads);
-        for (std::size_t t = 0; t < nthreads; ++t) allocs.emplace_back(std::make_unique<TempAlloc>());
+        for (std::size_t t = 0; t < nthreads; ++t) allocs.emplace_back(std::make_unique<ThreadAllocator>());
 
         const std::size_t block = (num_rows + nthreads - 1) / nthreads; // Κατανομή γραμμών
         std::vector<std::thread> threads;
@@ -423,7 +430,7 @@ public:
             if (begin_row >= end_row) break;
             threads.emplace_back([&, t, begin_row, end_row]() {
                 auto& my_lists = lists[t];
-                TempAlloc& my_alloc = *allocs[t];  // Thread-local allocator
+                ThreadAllocator& my_alloc = *allocs[t];  // Thread-local allocator
 
                 // Βρες την αρχική σελίδα για το begin_row (δυαδική αναζήτηση)
                 std::size_t page_idx = 0;
@@ -455,7 +462,9 @@ public:
                     const uint64_t h = compute_hash(key);               // Hash
                     const std::size_t slot = (h >> shift_) & dir_mask_; // Slot
                     const uint16_t tag = Bloom::make_tag_from_hash(h);  // Bloom tag
-                    chunklist_push(my_lists[slot], TmpEntry{key, static_cast<uint32_t>(row), tag}, my_alloc);
+                    // Επίπεδο 3: Χρησιμοποιούμε partition arena για δέσμευση ανά partition
+                    PartitionArena& partition_alloc = my_alloc.get_partition_arena(slot);
+                    chunklist_push_from_partition(my_lists[slot], TmpEntry{key, static_cast<uint32_t>(row), tag}, partition_alloc);
                 }
             });
         }
@@ -561,3 +570,5 @@ private:
 // Alias για backward compatibility
 template<typename Key, typename Hasher = Hash::Hasher32>
 using UnchainedHashTable = FlatUnchainedHashTable<Key, Hasher>;
+
+} // namespace Contest

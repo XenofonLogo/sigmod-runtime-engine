@@ -93,9 +93,17 @@ struct JoinAlgorithm {
         size_t hw = std::thread::hardware_concurrency();  // Διαθέσιμα threads
         if (!hw) hw = 4;                                   // Fallback
 
+        // Allow override for experiments
+        const char* force_threads_env = std::getenv("FORCE_THREADS");
+        size_t forced_threads = 0;
+        if (force_threads_env && *force_threads_env) {
+            forced_threads = static_cast<size_t>(std::atoi(force_threads_env));
+        }
+
         // Parallelize only when it pays off.
         // (GR) Για μικρά inputs το overhead των threads είναι μεγαλύτερο από το κέρδος.
-        const size_t nthreads = (probe_n >= (1u << 18)) ? hw : 1; // Παραλληλοποίηση μόνο αν συμφέρει
+        const size_t nthreads = forced_threads > 0 ? forced_threads : 
+                                ((probe_n >= (1u << 18)) ? hw : 1); // Παραλληλοποίηση μόνο αν συμφέρει
         std::vector<std::vector<OutPair>> out_by_thread(nthreads); // Τοπικά αποτελέσματα
 
         // PROBE PHASE: work stealing with atomic counter for dynamic load balancing

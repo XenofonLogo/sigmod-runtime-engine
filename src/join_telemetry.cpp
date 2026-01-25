@@ -2,6 +2,7 @@
 #include "join_telemetry.h"
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 
 namespace Contest {
 
@@ -11,6 +12,8 @@ static std::atomic<uint64_t> g_query_seq{0};
 static thread_local QueryTelemetry g_qt;
 // ID τρέχοντος query (ανά thread), συντονίζεται με g_query_seq
 static thread_local uint64_t g_query_id = 0;
+// Χρονική στιγμή έναρξης query (ανά thread)
+static thread_local std::chrono::steady_clock::time_point g_query_start;
 
 bool join_telemetry_enabled() {
     // Προαιρετικά stats για να δούμε αν είμαστε memory-bandwidth bound.
@@ -26,6 +29,7 @@ bool join_telemetry_enabled() {
 void qt_begin_query() {
     g_query_id = ++g_query_seq;   // Πάρε νέο ID (atomic increment)
     g_qt = QueryTelemetry{};      // Μηδενισμός/επανεκκίνηση μετρήσεων
+    g_query_start = std::chrono::steady_clock::now();
 }
 
 void qt_add_join(uint64_t build_rows,
@@ -52,6 +56,18 @@ void qt_add_join(uint64_t build_rows,
 }
 
 void qt_end_query() {
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(now - g_query_start).count();
+    const double elapsed_s = elapsed_ms / 1000.0;
+
+    const double selectivity = (g_qt.probe_rows == 0) ? 0.0 : static_cast<double>(g_qt.out_rows) / static_cast<double>(g_qt.probe_rows);
+    const double avg_out_cols = (g_qt.out_rows == 0) ? 0.0 : static_cast<double>(g_qt.out_cells) / static_cast<double>(g_qt.out_rows);
+
+    const auto safe_div = [](uint64_t bytes, double seconds) -> double {
+        if (seconds <= 0.0) return 0.0;
+        return static_cast<double>(bytes) / (seconds * 1e9);
+    };
+
     const auto bytes_to_gib = [](uint64_t bytes) -> double {
         return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
     };
@@ -67,13 +83,15 @@ void qt_end_query() {
 
     // Γραμμή σύνοψης πλήθους πράξεων και γραμμών
     std::fprintf(stderr,
-                 "[telemetry q%llu] joins=%llu build=%llu probe=%llu out=%llu out_cells=%llu\n",
+                 "[telemetry q%llu] joins=%llu build=%llu probe=%llu out=%llu out_cells=%llu sel=%.4f avg_out_cols=%.2f\n",
                  (unsigned long long)g_query_id,
                  (unsigned long long)g_qt.joins,
                  (unsigned long long)g_qt.build_rows,
                  (unsigned long long)g_qt.probe_rows,
                  (unsigned long long)g_qt.out_rows,
-                 (unsigned long long)g_qt.out_cells);
+                 (unsigned long long)g_qt.out_cells,
+                 selectivity,
+                 avg_out_cols);
 
     // Εκτίμηση όγκου δεδομένων σε GiB (κατώτερο και πιθανό σενάριο)
     std::fprintf(stderr,
@@ -81,6 +99,14 @@ void qt_end_query() {
                  (unsigned long long)g_query_id,
                  bytes_to_gib(g_qt.bytes_strict_min),
                  bytes_to_gib(g_qt.bytes_likely));
+
+    // Πραγματικός χρόνος και μετρημένο bandwidth
+    std::fprintf(stderr,
+                 "[telemetry q%llu] elapsed=%.3f ms  bw_strict=%.2f GB/s  bw_likely=%.2f GB/s\n",
+                 (unsigned long long)g_query_id,
+                 elapsed_ms,
+                 safe_div(g_qt.bytes_strict_min, elapsed_s),
+                 safe_div(g_qt.bytes_likely, elapsed_s));
 
     // Θεωρητικά κάτω όρια χρόνου (μόνο bandwidth) για strict bytes
     std::fprintf(stderr,
