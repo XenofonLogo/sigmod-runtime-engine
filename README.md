@@ -78,7 +78,7 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 - **Τι κάνει**: Flat storage χωρίς chains — όλα τα tuples σε έναν μεγάλο contiguous array
 - Directory structure: prefix-based partitioning (κάθε hash prefix δείχνει ένα range tuples)
 - 16-bit bloom filters ανά partition για γρήγορη rejection
-- **Σχέση με STRICT**: STRICT mode χρησιμοποιεί 256 partitions + thread-safe parallel build
+- **Σχέση με STRICT**: STRICT mode χρησιμοποιεί 64 partitions + thread-safe parallel build
 - **Σχέση με OPTIMIZED**: OPTIMIZED mode χρησιμοποιεί single-pass unchained χωρίς partitions
 - **Αποτέλεσμα**: 28.3% improvement (από 46.12s → 27.24s)
 - **Αρχεία**: `include/unchained_hashtable.h`, `include/parallel_unchained_hashtable.h`
@@ -147,7 +147,7 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 **Partition-Based Build (STRICT Mode)**
 - **Σκοπός**: Thread-safe parallel build χωρίς locks
 - **Αρχιτεκτονική**:
-  - Χωρίζουμε το hash table σε 256 partitions
+  - Χωρίζουμε το hash table σε 64 partitions
   - Κάθε partition ανήκει σε ένα thread (one-writer)
   - Phase 1: Κάθε thread χτίζει τοπικές λίστες (chunk lists) ανα partition
   - Phase 2: One-writer-per-partition: κάθε partition γράφεται από ένα thread
@@ -157,13 +157,13 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
   - Level 2: Thread-local SlabAllocator (per thread, μεγάλα blocks)
   - Level 3: Chunk lists (μικρά blocks από thread-local allocator)
   - Αποφυγή contention και false sharing
-- **Αποτέλεσμα**: 20.4% improvement (27.24s → 21.68s)
+
 
 **Work-Stealing Load Balancing (Probe Phase)**
 - **Σκοπός**: Δυναμική κατανομή δουλειάς όταν κάποιες queries είναι βαρύτερες
 - **Μηχανισμός**:
   - `WorkStealingCoordinator`: Διατηρεί κοινή λίστα work blocks
-  - Κάθε thread παίρνει ένα block (π.χ., 256 rows)
+  - Κάθε thread παίρνει ένα block (minimum 256 rows, υπολογίζεται δυναμικά)
   - Όταν ένας thread τελειώνει: κλέβει το επόμενο block από τη λίστα
   - Adaptive parallelization: nthreads = (probe_n >= 2^18) ? hw : 1
 - **Αποφυγή**:
@@ -173,12 +173,11 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 
 
 **Αρχεία Υλοποίησης**
-- `include/unchained_hashtable.h` - Unchained HT interface
-- `include/parallel_unchained_hashtable.h` - STRICT mode implementation (partitioned + bloom)
-- `src/execute_default.cpp` - Zero-copy logic (lines 47-100) + work-stealing (lines 115-230)
-- `src/hashtable_builder.cpp` - Partition-based building
+- `include/unchained_hashtable.h` 
+- `include/parallel_unchained_hashtable.h` 
+- `src/execute_default.cpp` 
+- `partition_hash_builder.h` - Parallel build με partitions
 - `src/work_stealing.cpp` - Load balancing coordinator
-- `include/bloom_filter.h` - Bloom filter helpers
  - `include/slab_allocator.h` - 3-level slab allocator (thread + per-partition)
 
 ---
@@ -188,7 +187,7 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 Δύο ολοκληρωμένες εκδόσεις με διαφορετικά trade-offs:
 
 **STRICT_PROJECT Mode (Απαιτήσεις Διαγωνισμού)**
-- **Στόχος**: Πληρέστε όλες τις 7 requirements από την εκφώνηση
+- **Στόχος**: Υλοποίηση όλων των requirements από την εκφώνηση
 - **Hash Table**: Partition-based unchained (64 partitions - optimal)
 - **Build Phase**:
   - Phase 1: Parallel partitioning με local chunk lists
@@ -197,7 +196,7 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 - **Compliance**:
   - REQ-1: Unchained hashtable με flat storage
   - REQ-2: Column-oriented με late materialization
-  - REQ-3: Parallelization (256 partitions, work-stealing)
+  - REQ-3: Parallelization (64 partitions, work-stealing)
   - REQ-4: Zero-copy INT32 indexing
   - REQ-6: Partition-based parallel build με 3-level slab allocator
   - REQ-8.2: Directory-based lookup με END pointers
@@ -277,79 +276,24 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 | 8 | OPTIMIZED Mode | 12.1s | 68.7% (vs #7) | 95.0% |
 
 
-**STRICT vs OPTIMIZED Detailed Comparison**
-
-**Build Phase Analysis (24.0s vs 10.2s)**
-- **STRICT**: 
-  - Phase 1: Parallel partitioning — 3.2s
-  - Phase 2: One-writer-per-partition gather — 18.0s
-  - Phase 3: Bloom merging — 2.8s
-- **OPTIMIZED**:
-  - Direct count (parallel) — 1.5s
-  - Prefix sum + allocate — 0.8s
-  - Copy with bloom update — 7.9s
-- **Λόγος 2.35x**: OPTIMIZED αποφεύγει partition synchronization
-
-**Probe Phase Analysis (8.0s vs 1.8s)**
-- **STRICT**: 
-  - 256 partitions = μεγαλύτερες range scans
-  - Περισσότερες συγκρούσεις → περισσότερες comparisons
-- **OPTIMIZED**:
-  - Single-pass = μικρότερες range scans
-  - Work-stealing = καλή load balancing
-  - Bloom filters εξαιρετικά αποτελεσματικές σε single-pass
-- **Λόγος 4.44x**: Σημαντικό κέρδος από απλούστερη δομή
-
-**Output Phase Analysis (2.5s vs 1.2s)**
-- **STRICT**: Materialization από 577 MB memory footprint
-- **OPTIMIZED**: Materialization από 234 MB (60% μείωση)
-- **Λόγος 2.08x**: Λιγότερα δεδομένα = γρήγορη materialization
-
-**Root Causes of Optimization (Ανάλυση Συμβολής)**
-Μια ανάλυση της συνεισφοράς κάθε βελτιστοποίησης:
-
-| Βελτιστοποίηση | Συνεισφορά |
-|---|---|
-| Partitioning efficiency (STRICT) | 39% |
-| Zero-Copy INT32 access | 18% |
-| Data structure optimization (unchained) | 7% |
-| Parallelization (work-stealing) | 4% |
-| Output optimization (late materialization) | 4% |
-
-**Memory Footprint Comparison**
-- **Baseline** (std::unordered_map): ~900 MB
-- **STRICT** (partition-based): 577 MB (36% reduction)
-- **OPTIMIZED** (single-pass): 234 MB (74% reduction)
-
-**Per-Query Performance**
-Οι μικρές queries σε OPTIMIZED τρέχουν sub-millisecond:
-- Query 1c: 4ms (STRICT) → 3ms (OPTIMIZED)
-- Query 5b: 1ms (STRICT) → 1ms (OPTIMIZED)
-- Query 7a: 503ms (STRICT) → 397ms (OPTIMIZED)
-- Query 8c: 904ms (STRICT) → 766ms (OPTIMIZED)
-
-**Αρχεία Μετρήσεων**
-- `MEASUREMENTS.md` - Detailed performance analysis με per-query metrics
-- `PARADOTEO_1.md` - Hash table analysis και Robin Hood vs alternatives
-- `PARADOTEO_2.md` - Column-store architecture και late materialization overhead
-- `PARADOTEO_3.md` - Parallelization strategy με work-stealing details
-
----
-
 ### 📊 Πειραματική Ανάλυση Ανά Παράμετρο
 
 **Experiment 1: Hash Table Structures (Impact on Build Phase)**
 
-Σύγκριση διαφορετικών hash table implementations για το ίδιο workload:
+Σύγκριση διαφορετικών hash table implementations για το ίδιο workload (μόνο συνολικός χρόνος και μνήμη):
 
-| Hash Table | Build Time | Probe Time | Total Time | Memory |
-|-----------|-----------|-----------|-----------|--------|
-| std::unordered_map | 89.2s | 153.6s | 242.8s | ~900 MB |
-| Robin Hood | 85.1s | 148.1s | 233.2s | ~850 MB |
-| Cuckoo | 87.4s | 149.8s | 237.2s | ~870 MB |
-| Hopscotch | 88.0s | 150.0s | 238.0s | ~880 MB |
-| Unchained (OPTIMIZED) | 10.2s | 1.8s | 13.2s | 234 MB |
-| Unchained (STRICT) | 24.0s | 8.0s | 34.5s | 577 MB |
+| Hash Table | Total Time | Memory |
+|-----------|-----------|--------|
+| std::unordered_map | 242.8s | ~900 MB |
+| Robin Hood | 233.2s | ~850 MB |
+| Cuckoo | 237.2s | ~870 MB |
+| Hopscotch | 238.0s | ~880 MB |
+| Unchained HT + Column + Late | 46.12s | ~410 MB |
+| Robin Hood (OPTIMIZED) | 37.914s | 
+| Cuckoo (OPTIMIZED) | 36.163s | 
+| Hopscotch (OPTIMIZED)| 38.670s | 
+| Unchained (OPTIMIZED) | 13.2s | 234 MB |
+
 
 **Παρατηρήσεις:**
 - Το unchained hashtable με zero-copy είναι **18x ταχύτερο** από std::unordered_map
@@ -360,14 +304,14 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 
 **Experiment 2: Column-Store vs Row-Store (Storage Layout)**
 
-Επίδραση του column-oriented storage στην απόδοση:
+Επίδραση του column-oriented storage στην απόδοση (σύνολο χρόνου μόνο):
 
-| Storage Layout | Build Time | Probe Time | Materialization | Total |
-|---------------|-----------|-----------|----------------|-------|
-| Row-oriented (baseline) | 92.3s | 155.2s | 45.1s | 292.6s |
-| Column-oriented | 38.4s | 62.8s | 31.3s | 132.5s |
-| + Late Materialization | 18.6s | 28.5s | 17.2s | 64.3s |
-| + Zero-Copy INT32 | 10.2s | 15.1s | 1.9s | 27.2s |
+| Storage Layout | Total |
+|---------------|-------|
+| Row-oriented (baseline) | 292.6s |
+| Column-oriented | 132.5s |
+| + Late Materialization | 64.3s |
+| + Zero-Copy INT32 | 27.2s |
 
 **Κέρδος column-store:**
 - **54.7%** μείωση χρόνου (292.6s → 132.5s)
@@ -424,19 +368,19 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 **OPTIMIZED Mode:**
 - **Peak Memory**: 4.34 GB (4,442 MB)
 - **Query Runtime**: 12.1s (4 threads)
-- **Wall Time**: 63.3s (including I/O)
-- **CPU Time**: 37.6s user + 25.0s system
+- **Wall Time**: 59.4s (including I/O)
+- **CPU Time**: 62.6s total
 
 **STRICT Mode:**
-- **Peak Memory**: 4.43 GB (4,535 MB)  
-- **Query Runtime**: 38.6s
-- **Wall Time**: 89.7s
-- **CPU Time**: 56.0s user + 69.0s system
+- **Peak Memory**: 3.89 GB (3,990 MB)  
+- **Query Runtime**: 32.4s
+- **Wall Time**: 80.3s
+- **CPU Time**: 98.4s total
 
 **Διαφορά:** 
-- Memory: STRICT χρησιμοποιεί +2.1% περισσότερη μνήμη
-- Runtime: STRICT είναι +219% πιο αργό (38.6s vs 12.1s)
-- CPU Time: STRICT χρησιμοποιεί +100% CPU χρόνο
+- Memory: OPTIMIZED χρησιμοποιεί +11.6% περισσότερη μνήμη (4.34 vs 3.89 GB)
+- Runtime: STRICT είναι +168% πιο αργό (32.4s vs 12.1s)
+- Wall Time: STRICT είναι +35% πιο αργό (80.3s vs 59.4s)
 
 **Σημείωση:** Η peak μνήμη περιλαμβάνει τα loaded CSV data (~3.6 GB) που είναι κοινά και στα δύο modes. Η διαφορά στην join execution structure είναι μικρή σε μνήμη αλλά μεγάλη σε χρόνο.
 
@@ -501,6 +445,5 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 - `PARADOTEO_2.md` - Column-store & late materialization
 - `PARADOTEO_3.md` - Parallel execution & zero-copy
 - `ADDITIONAL_IMPLEMENTATIONS.md` - OPTIMIZED optimizations
-- `MEASUREMENTS.md` - Performance measurements
 
 Δείτε τα σχετικά `.md` αρχεία για πλήρες τεχνικό background.

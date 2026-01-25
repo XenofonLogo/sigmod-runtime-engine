@@ -150,7 +150,7 @@ public:
             slots.push_back(s);
 
             for (auto rid : g.second)
-                _storage.push_back({g.first, rid});
+                _storage.push_back({g.first, static_cast<uint32_t>(rid)});
 
             idx += g.second.size();
         }

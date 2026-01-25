@@ -162,7 +162,7 @@ public:
             index_infos_to_insert.push_back(info);
 
             for (size_t row_id : row_ids) {
-                _storage.emplace_back(Entry{key, row_id});
+                _storage.emplace_back(Entry{key, static_cast<uint32_t>(row_id)});
             }
             current_storage_index += row_ids.size();
         }
