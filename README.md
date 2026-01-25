@@ -260,7 +260,7 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 
 ### MEASUREMENTS: Performance Analysis & Optimization Path
 
-**Optimization History: 8 Iterations Προς OPTIMIZED**
+**Optimization History: 7 Iterations Προς OPTIMIZED**
 Το project ακολούθησε ένα συστηματικό δρόμο βελτιστοποίησης (τελικό runtime: 12.1s):
 
 | Iteration | Τεχνική | Runtime | Improvement | Cumulative |
