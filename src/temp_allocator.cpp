@@ -4,9 +4,9 @@
 namespace Contest {
 
 void* TempAlloc::alloc(std::size_t bytes, std::size_t align) {
-    // Υπολογίζει το μέγεθος με ευθυγράμμιση (alignment)
+    // Υπολογίζει μέγεθος με ευθυγράμμιση (power-of-two align μόνο)
     const std::size_t aligned = (bytes + (align - 1)) & ~(align - 1);
-    // Αν δεν υπάρχει αρκετός χώρος στο τρέχον slab, δεσμεύει νέο
+    // Αν δεν φτάνει ο χώρος στο τρέχον slab, δεσμεύει νέο
     if (remaining < aligned) {
         const size_t slab_bytes = std::max(aligned, SLAB_SIZE);
         void* slab = ::operator new(slab_bytes);
@@ -14,7 +14,7 @@ void* TempAlloc::alloc(std::size_t bytes, std::size_t align) {
         current = static_cast<std::byte*>(slab);
         remaining = slab_bytes;
     }
-    // Επιστρέφει pointer στη νέα μνήμη και ενημερώνει τον δείκτη
+    // Επιστροφή pointer και μετακίνηση cursor
     void* ptr = current;
     current += aligned;
     remaining -= aligned;
@@ -22,7 +22,7 @@ void* TempAlloc::alloc(std::size_t bytes, std::size_t align) {
 }
 
 TempAlloc::~TempAlloc() {
-    // Free all slabs at once
+    // Ελευθερώνει όλα τα slabs μαζικά
     for (void* slab : slabs) {
         ::operator delete(slab);
     }

@@ -9,32 +9,32 @@
 
 namespace Contest {
 
-// Temporary entry for partitioned hash building
+// Προσωρινή εγγραφή για partitioned χτίσιμο hash table
 template<typename Key>
 struct TmpEntry {
-    Key key;
-    uint32_t row_id;
-    uint16_t tag;  // Bloom filter tag
+    Key key;         // Κλειδί
+    uint32_t row_id; // Γραμμή προέλευσης
+    uint16_t tag;    // Bloom tag για γρήγορη απόρριψη
 };
 
-// Fixed-size chunk for efficient allocation
+// Chunk σταθερού μεγέθους για αποδοτική δέσμευση
 template<typename Key>
 struct Chunk {
     static constexpr uint32_t kChunkCap = 256;
     
-    Chunk* next;
-    uint32_t size;
-    TmpEntry<Key> items[kChunkCap];
+    Chunk* next;                     // Επόμενο chunk στη λίστα
+    uint32_t size;                   // Πλήθος στοιχείων στο chunk
+    TmpEntry<Key> items[kChunkCap];  // Αποθηκευμένες εγγραφές
 };
 
-// Linked list of chunks for each partition
+// Συνδεδεμένη λίστα chunks ανά partition
 template<typename Key>
 struct ChunkList {
     Chunk<Key>* head = nullptr;
     Chunk<Key>* tail = nullptr;
 };
 
-// Allocate a new chunk from the temp allocator
+// Δέσμευση νέου chunk από τον προσωρινό allocator
 template<typename Key>
 inline Chunk<Key>* alloc_chunk(TempAlloc& alloc) {
     void* mem = alloc.alloc(sizeof(Chunk<Key>), alignof(Chunk<Key>));
@@ -44,7 +44,7 @@ inline Chunk<Key>* alloc_chunk(TempAlloc& alloc) {
     return c;
 }
 
-// Push an entry to the chunk list
+// Προσθήκη εγγραφής σε λίστα chunks (δημιουργεί νέο chunk αν γεμίσει το τρέχον)
 template<typename Key>
 inline void chunklist_push(ChunkList<Key>& list, const TmpEntry<Key>& e, TempAlloc& alloc) {
     constexpr uint32_t kChunkCap = Chunk<Key>::kChunkCap;

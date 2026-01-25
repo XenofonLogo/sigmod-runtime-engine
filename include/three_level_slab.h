@@ -10,18 +10,18 @@
 namespace Contest {
 
 // 3-επίπεδος slab allocator:
-// Επίπεδο 1: Το global arena παρέχει μεγάλα blocks μνήμης.
-// Επίπεδο 2: Το thread-local arena κάνει sub-allocate από τα global blocks.
-// Επίπεδο 3: Το partition arena (ανά thread) εξυπηρετεί μικρές δεσμεύσεις για τα per-partition chunks.
-// Το TempAlloc (δες temp_allocator.h) κάθεται πάνω από το thread arena και δίνει per-partition chunk lists κατά το partitioned hash build.
+// Επίπεδο 1: global blocks μεγάλου μεγέθους.
+// Επίπεδο 2: thread-local arena που τεμαχίζει τα global blocks.
+// Επίπεδο 3: partition arena ανά thread για μικρές δεσμεύσεις (π.χ. chunk lists στο partitioned build).
+// Το TempAlloc χτίζεται πάνω από το thread arena για τις per-partition λίστες.
 
 class ThreeLevelSlab {
 public:
-    // Υποχρεωτικός slab allocator σύμφωνα με τις απαιτήσεις: πάντα ενεργοποιημένος.
+    // Πάντα ενεργός σύμφωνα με τις απαιτήσεις
     static bool enabled() { return true; }
 
     struct PartitionArena {
-        // Επίπεδο 3: partition arena — μικρές δεσμεύσεις μνήμης για partition chunks.
+        // Επίπεδο 3: partition arena — μικρές δεσμεύσεις για partition chunks
         void* alloc(std::size_t bytes, std::size_t align) {
             return thread_arena().alloc(bytes, align);
         }
@@ -37,14 +37,14 @@ public:
         struct ThreadArena {
             std::byte* cur = nullptr;
             std::size_t remaining = 0;
-            std::vector<void*> blocks; // Επίπεδο 1: μεγάλα blocks ανά thread
+            std::vector<void*> blocks; // Επίπεδο 1: blocks ανά thread
 
             void* alloc(std::size_t bytes, std::size_t align) {
-                // Υπολογίζει το μέγεθος με ευθυγράμμιση (alignment)
+                // Υπολογισμός μεγέθους με ευθυγράμμιση
                 const std::size_t aligned = (bytes + (align - 1)) & ~(align - 1);
                 void* p = nullptr;
 
-                // Αν υπάρχει αρκετός χώρος στο τρέχον block, επιστρέφει pointer
+                // Αν υπάρχει χώρος στο τρέχον block
                 if (cur && remaining >= aligned) {
                     p = cur;
                     cur += aligned;
@@ -52,7 +52,7 @@ public:
                     return p;
                 }
 
-                // Δεσμεύει νέο block (ανά thread, χωρίς locks)
+                // Νέο block (ανά thread, χωρίς locks)
                 const std::size_t block_size = global_block_size();
                 const std::size_t need = aligned + align;
                 const std::size_t bytes_to_get = need > block_size ? need : block_size;
@@ -60,7 +60,7 @@ public:
                 std::byte* block = static_cast<std::byte*>(::operator new(bytes_to_get));
                 blocks.push_back(block);
 
-                // Ευθυγραμμίζει το pointer στο νέο block
+                // Ευθυγράμμιση pointer στο νέο block
                 std::uintptr_t raw = reinterpret_cast<std::uintptr_t>(block);
                 std::uintptr_t aligned_raw = (raw + (align - 1)) & ~(static_cast<std::uintptr_t>(align - 1));
                 cur = reinterpret_cast<std::byte*>(aligned_raw);
@@ -72,29 +72,22 @@ public:
                 return p;
             }
 
-            ~ThreadArena() = default; // Τα blocks διατηρούνται μέχρι το τέλος του process για να αποφευχθούν dangling pointers μεταξύ threads
+            ~ThreadArena() = default; // Δεν αποδεσμεύουμε τα blocks για αποφυγή dangling μεταξύ threads
         };
 
         static ThreadArena& thread_arena() {
-            // Επίπεδο 2: thread-local arena (ένα arena ανά thread)
+            // Επίπεδο 2: thread-local arena (ένα ανά thread)
             static thread_local ThreadArena arena;
             return arena;
         }
     };
 
-    // Επιστρέφει ένα partition arena (για χρήση σε κάθε thread)
+    // Επιστρέφει partition arena (για χρήση σε κάθε thread)
     static PartitionArena partition_arena() { return PartitionArena{}; }
 
-    // Επιστρέφει το μέγεθος του global block (default: 4 MiB, μπορεί να αλλάξει με env var)
+    // Μέγεθος global block (σταθερό: 4 MiB)
     static std::size_t global_block_size() {
-        static const std::size_t size = [] {
-            const char* v = std::getenv("REQ_SLAB_GLOBAL_BLOCK_BYTES");
-            if (!v || !*v) return static_cast<std::size_t>(1ull << 22);
-            const long parsed = std::strtol(v, nullptr, 10);
-            if (parsed < (1 << 20)) return static_cast<std::size_t>(1ull << 20);
-            return static_cast<std::size_t>(parsed);
-        }();
-        return size;
+        return static_cast<std::size_t>(1ull << 22);
     }
 };
 

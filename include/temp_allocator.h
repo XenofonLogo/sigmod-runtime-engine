@@ -7,17 +7,14 @@
 
 namespace Contest {
 
-// Per-build slab allocator for temporary storage
-// Allocates in chunks, frees all at once when destroyed
-// Per-build slab allocator for temporary storage.
-// Lives on top of ThreeLevelSlab's thread arena: used by partition_hash_builder to allocate
-// per-partition chunk lists during the required partitioned hash build.
+// Slab allocator προσωρινής μνήμης ανά build: δεσμεύει σε chunks και ελευθερώνει μαζικά στο τέλος.
+// Χρησιμοποιείται από partition_hash_builder για λίστες chunk ανά partition (βημα STRICT).
 struct TempAlloc {
     static constexpr size_t SLAB_SIZE = 1 << 20; // 1MB slabs
     
-    std::vector<void*> slabs;
-    std::byte* current = nullptr;
-    size_t remaining = 0;
+    std::vector<void*> slabs;   // Κρατά τους δείκτες των slab
+    std::byte* current = nullptr; // Τρέχουσα θέση γραφής στο slab
+    size_t remaining = 0;         // Υπόλοιπο bytes στο τρέχον slab
 
     TempAlloc() = default;
 

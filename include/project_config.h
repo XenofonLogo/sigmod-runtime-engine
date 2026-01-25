@@ -3,21 +3,21 @@
  * 
  * Three build modes for different tradeoffs:
  * 
- * 1. STRICT_PROJECT=1 (default)
- *    - Full requirement implementation
- *    - Partition-based hash table construction
- *    - 3-level slab allocator
- *    - All parallelization requirements met
- *    - Performance: Slower (+189%)
- *    - Correctness: 100% of requirements
- * 
- * 2. OPTIMIZED_PROJECT=1
+ * 1. OPTIMIZED_PROJECT (default)
  *    - Fast single-pass hash table
  *    - Direct zero-copy page access
  *    - No slab allocator overhead
  *    - Parallel probing with work stealing
  *    - Performance: 11.12s baseline (FAST)
  *    - Correctness: Core requirements met
+ * 
+ * 2. STRICT_PROJECT=1
+ *    - Full requirement implementation
+ *    - Partition-based hash table construction
+ *    - 3-level slab allocator
+ *    - All parallelization requirements met
+ *    - Performance: Slower (+189%)
+ *    - Correctness: 100% of requirements
  * 
  * 3. JOIN_TELEMETRY=1
  *    - Optional performance instrumentation
@@ -40,12 +40,18 @@ inline bool is_optimized_mode() {
     return v && *v && *v != '0';
 }
 
-// Default: STRICT_PROJECT=1 (unless OPTIMIZED_PROJECT=1 is explicitly set)
+// Default: OPTIMIZED (unless STRICT_PROJECT=1 is set)
+inline bool use_optimized_project() {
+    // Explicit STRICT wins over everything
+    if (is_strict_mode()) return false;
+    // Explicit OPTIMIZED turns it on
+    if (is_optimized_mode()) return true;
+    // Default: optimized path
+    return true;
+}
+
 inline bool use_strict_project() {
-    // If OPTIMIZED is explicitly on, use it
-    if (is_strict_mode()) return true;
-    // Otherwise default to STRICT (partition build)
-    return false;
+    return !use_optimized_project();
 }
 
 } // namespace Contest
