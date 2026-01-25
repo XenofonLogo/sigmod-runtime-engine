@@ -271,9 +271,8 @@ cmake --build build --target software_tester -- -j && ./build/software_tester --
 | 3 | Late Materialization | 64.33s | 51.4% | 73.5% |
 | 4 | Unchained Hashtable | 46.12s | 28.3% | 81.0% |
 | 5 | Zero-Copy INT32 | 27.24s | 40.9% | 88.8% |
-| 6 | Partition-Based Build | 21.68s | 20.4% | 91.1% |
-| 7 | STRICT Mode Final | 38.6s | +78% (vs #6) | 84.1% |
-| 8 | OPTIMIZED Mode | 12.1s | 68.7% (vs #7) | 95.0% |
+| 6 | STRICT Mode Final | 38.6s | +78% (vs #6) | 84.1% |
+| 7 | OPTIMIZED Mode | 12.1s | 68.7% (vs #7) | 95.0% |
 
 
 ### 📊 Πειραματική Ανάλυση Ανά Παράμετρο
