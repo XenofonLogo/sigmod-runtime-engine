@@ -21,14 +21,14 @@ cmake --build build -- -j $(nproc) fast
 
 ## Run 
 
-### STRICT Mode (Απαιτήσεις Διαγωνισμού) - Προεπιλογή
+### OPTIMIZED Mode (Ταχύτητα)
 ```bash
 ./build/fast plans.json
 ```
 
-### OPTIMIZED Mode (Ταχύτητα)
+### STRICT Mode (Απαιτήσεις Διαγωνισμού)
 ```bash
-OPTIMIZED_PROJECT=1 ./build/fast plans.json
+STRICT_PROJECT=1 ./build/fast plans.json
 ```
 
 ### Με Telemetry
