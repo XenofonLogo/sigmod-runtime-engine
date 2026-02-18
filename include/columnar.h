@@ -8,30 +8,30 @@
 
 namespace Contest {
 
-// Βοηθός ανάγνωσης bitmap (1=valid, 0=null) σε inline μορφή για ταχύτητα
+// Helper for reading a bitmap (1=valid, 0=null) inlined for speed
 static inline bool get_bitmap_local_col(const uint8_t* bitmap, uint16_t idx) {
     auto byte_idx = idx / 8;
     auto bit = idx % 8;
     return bitmap[byte_idx] & (1u << bit);
 }
 
-// Αποθήκευση στηλών με επιλογή zero-copy για INT32 χωρίς NULLs ώστε να αποφεύγεται materialization
+// Column storage with optional zero-copy for INT32 without NULLs to avoid materialization
 struct column_t {
-    std::vector<std::vector<value_t>> pages;    // Σελίδες αποθηκευμένων value_t
+    std::vector<std::vector<value_t>> pages;    // Pages of stored value_t
 
-    const Column* src_column = nullptr;         // Πηγή zero-copy (INT32 χωρίς NULL)
-    std::vector<size_t> page_offsets;           // Αθροιστικά offsets ανά σελίδα
-    bool is_zero_copy = false;                  // Flag ενεργοποίησης zero-copy
+    const Column* src_column = nullptr;         // Source for zero-copy (INT32 without NULL)
+    std::vector<size_t> page_offsets;           // Cumulative offsets per page
+    bool is_zero_copy = false;                  // Zero-copy enabled flag
 
-    size_t values_per_page = 1024;              // Μέγεθος σελίδας σε πλήθος value_t
-    size_t num_values = 0;                      // Σύνολο αποθηκευμένων τιμών
+    size_t values_per_page = 1024;              // Page size in number of value_t
+    size_t num_values = 0;                      // Total stored values
 
-    mutable size_t cached_page_idx = 0;         // Cache σελίδας για σειριακή πρόσβαση
+    mutable size_t cached_page_idx = 0;         // Page cache for sequential access
 
     column_t() = default;
     explicit column_t(size_t page_size) : values_per_page(page_size), num_values(0) {}
 
-    // Προσθήκη τιμής με αυτόματη δημιουργία/γεμίσματος σελίδων
+    // Append a value, auto-creating/filling pages as needed
     void append(const value_t& v) {
         if (pages.empty() || pages.back().size() >= values_per_page) {
             pages.emplace_back();
@@ -42,26 +42,26 @@ struct column_t {
     }
 
     const value_t& get(size_t row_idx) const {
-        // ZERO-COPY διαδρομή: αποφεύγει materialization και bitmap check
+        // ZERO-COPY path: avoids materialization and bitmap checks
         if (is_zero_copy && src_column != nullptr) {
             static thread_local value_t tmp;
             
-            // Ξεκίνα από cached σελίδα (τυπικά διαδοχική πρόσβαση)
+            // Start from cached page (typical sequential access)
             size_t page_idx = cached_page_idx;
             
-            // Έλεγχος αν το row είναι στην cached σελίδα
+            // Check if the row is in the cached page
             if (page_idx < page_offsets.size() - 1 &&
                 row_idx >= page_offsets[page_idx] &&
                 row_idx < page_offsets[page_idx + 1]) {
                 // Cache hit
             }
-            // Έλεγχος επόμενης σελίδας (συχνό σε σειριακά patterns)
+            // Check next page (common for sequential patterns)
             else if (page_idx + 1 < page_offsets.size() - 1 &&
                      row_idx >= page_offsets[page_idx + 1] &&
                      row_idx < page_offsets[page_idx + 2]) {
                 cached_page_idx = ++page_idx;
             }
-            // Δυαδική αναζήτηση σελίδας
+            // Binary search for the page
             else {
                 size_t left = 0, right = page_offsets.size() - 1;
                 while (left < right - 1) {
@@ -76,10 +76,10 @@ struct column_t {
                 cached_page_idx = page_idx;
             }
             
-            // Υπολογισμός θέσης μέσα στη σελίδα
+            // Compute position within the page
             size_t slot = row_idx - page_offsets[page_idx];
             
-            // Άμεση ανάγνωση από raw page (INT32 data ξεκινά στο +4)
+            // Direct read from raw page (INT32 data starts at +4)
             auto* page = src_column->pages[page_idx]->data;
             auto* data = reinterpret_cast<const int32_t*>(page + 4);
             
@@ -87,23 +87,23 @@ struct column_t {
             return tmp;
         }
 
-        // STANDARD διαδρομή: πρόσβαση σε materialized value_t
+        // STANDARD path: access materialized value_t
         size_t page_idx = row_idx / values_per_page;
         size_t offset_in_page = row_idx % values_per_page;
         return pages[page_idx][offset_in_page];
     }
 
-    // Thread-safe accessor χωρίς χρήση shared mutable state (επιστρέφει by value)
+    // Thread-safe accessor without shared mutable state (returns by value)
     value_t get_cached(size_t row_idx, size_t& page_cache) const {
         if (is_zero_copy && src_column != nullptr) {
             size_t page_idx = page_cache;
             if (page_idx >= page_offsets.size() - 1) page_idx = 0;
 
-            // Γρήγορη διαδρομή: cache hit
+            // Fast path: cache hit
             if (row_idx >= page_offsets[page_idx] && row_idx < page_offsets[page_idx + 1]) {
                 // ok
             }
-            // Έλεγχος επόμενης σελίδας (χρήσιμο σε ημι-συσπειρωμένη πρόσβαση)
+            // Check next page (useful for semi-clustered access)
             else if (page_idx + 1 < page_offsets.size() - 1 && row_idx >= page_offsets[page_idx + 1] &&
                      row_idx < page_offsets[page_idx + 2]) {
                 ++page_idx;
@@ -118,7 +118,7 @@ struct column_t {
             }
 
             page_cache = page_idx;
-            const size_t slot = row_idx - page_offsets[page_idx];      // Θέση μέσα στη σελίδα
+            const size_t slot = row_idx - page_offsets[page_idx];      // Position within the page
             auto* page = src_column->pages[page_idx]->data;
             auto* data = reinterpret_cast<const int32_t*>(page + 4);
             return value_t::make_i32(data[slot]);
@@ -131,30 +131,30 @@ struct column_t {
 
     class Iterator {
     public:
-        Iterator(const column_t* col, size_t idx) : column(col), row_idx(idx) {} // Δεσμεύει δείκτη + θέση
-        const value_t& operator*() const { return column->get(row_idx); }        // Πρόσβαση τρέχουσας τιμής
-        Iterator& operator++() { ++row_idx; return *this; }                       // Επόμενη τιμή
-        bool operator!=(const Iterator& other) const { return row_idx != other.row_idx; } // Σύγκριση τέλους
+        Iterator(const column_t* col, size_t idx) : column(col), row_idx(idx) {} // Holds pointer + position
+        const value_t& operator*() const { return column->get(row_idx); }        // Access current value
+        Iterator& operator++() { ++row_idx; return *this; }                       // Move to next
+        bool operator!=(const Iterator& other) const { return row_idx != other.row_idx; } // End comparison
     private:
-        const column_t* column; // Πηγή δεδομένων
-        size_t row_idx;         // Τρέχον index
+        const column_t* column; // Data source
+        size_t row_idx;         // Current index
     };
 
-    Iterator begin() const { return Iterator(this, 0); }             // Έναρξη iteration
-    Iterator end() const { return Iterator(this, num_values); }      // Τέλος iteration
-    size_t size() const { return num_values; }                       // Πλήθος στοιχείων
+    Iterator begin() const { return Iterator(this, 0); }             // Start iteration
+    Iterator end() const { return Iterator(this, num_values); }      // End iteration
+    size_t size() const { return num_values; }                       // Number of elements
 };
 
 struct ColumnBuffer {
-    std::vector<column_t> columns;   // Στήλες δεδομένων
-    size_t num_rows = 0;             // Πλήθος γραμμών
-    std::vector<DataType> types;     // Τύποι στηλών
+    std::vector<column_t> columns;   // Data columns
+    size_t num_rows = 0;             // Number of rows
+    std::vector<DataType> types;     // Column types
 
     ColumnBuffer() = default;
     ColumnBuffer(size_t cols, size_t rows) : columns(cols), num_rows(rows) {
-        for (auto &c : columns) c = column_t(1024); // Αρχικοποίηση σταθερού page size
+        for (auto &c : columns) c = column_t(1024); // Initialize fixed page size
     }
-    size_t num_cols() const { return columns.size(); } // Επιστρέφει πλήθος στηλών
+    size_t num_cols() const { return columns.size(); } // Return number of columns
 };
 
 // Columnar operations

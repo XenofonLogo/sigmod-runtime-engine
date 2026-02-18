@@ -6,7 +6,7 @@
 #include "columnar.h"
 
 // ============================================================================
-// STRICT INTEGRATION TESTS
+// INTEGRATION TESTS
 // Tests actual columnar storage, zero-copy, late materialization, and execution engine
 // ============================================================================
 

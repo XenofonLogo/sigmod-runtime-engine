@@ -10,7 +10,7 @@
 #include "unchained_hashtable_wrapper.h"
 
 // ============================================================================
-// STRICT HASH TABLE IMPLEMENTATION TESTS
+// HASH TABLE IMPLEMENTATION TESTS
 // Tests the actual hash table wrappers used in the join execution engine
 // ============================================================================
 

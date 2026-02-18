@@ -1,13 +1,13 @@
-# Software Tester - Οδηγίες Εκτέλεσης και Ανάλυση
+# Software Tester - Execution Instructions and Test Analysis
 
-## Περιεχόμενα
-- [Γενικές Οδηγίες Εκτέλεσης](#γενικές-οδηγίες-εκτέλεσης)
-- [Εκτέλεση ανά Κατηγορία](#εκτέλεση-ανά-κατηγορία)
-- [Αναλυτική Περιγραφή Tests](#αναλυτική-περιγραφή-tests)
+## Contents
+- [General Execution Instructions](#general-execution-instructions)
+- [Run by Category](#run-by-category)
+- [Detailed Test Descriptions](#detailed-test-descriptions)
 
 ---
 
-## Γενικές Οδηγίες Εκτέλεσης
+## General Execution Instructions
 
 ### Build
 ```bash
@@ -15,135 +15,136 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target software_tester -- -j 
 ```
 
-### Εκτέλεση Όλων των Tests
+### Run All Tests
 ```bash
 ./build/software_tester
 ```
 
-### Εκτέλεση με Compact Report
+### Run with Compact Report
 ```bash
 ./build/software_tester --reporter compact
 ```
 
-### Λίστα Όλων των Tests
+### List All Tests
 ```bash
 ./build/software_tester --list-tests
 ```
 
-### Συνολικά Στατιστικά
-- **Σύνολο Tests**: 90
+### Overall Statistics
+- **Total Tests**: 90
 - **Assertions**: 5,808
-- **Επιτυχημένα**: 89 (98.9%)
-- **Αποτυχημένα**: 1 (προϋπάρχον πρόβλημα με hash quality string test)
+- **Passed**: 89 (98.9%)
+- **Failed**: 1 (pre-existing issue with hash quality string test)
 
 ---
 
-## Εκτέλεση ανά Κατηγορία
+## Run by Category
 
 ### 1. Hash Quality Tests
 ```bash
 ./build/software_tester "[hash][quality]"
 ```
-**Περιγραφή**: Έλεγχος ποιότητας hash functions για διάφορους τύπους δεδομένων
+**Description**: Checks hash function quality for various data types
 
 ### 2. Slab Allocator Tests
 ```bash
 ./build/software_tester "[slab]"
 ```
-**Περιγραφή**: Έλεγχος του three-level slab allocator για αποδοτική διαχείριση μνήμης
+**Description**: Tests for the three-level slab allocator used for efficient memory management
 
 ### 3. Partitioned Build Tests
 ```bash
 ./build/software_tester "[partitioned-build]"
 ```
-**Περιγραφή**: Έλεγχος του partitioned hash table build με prefix-sum για παράλληλη κατασκευή
+**Description**: Tests for the partitioned hash table build using prefix-sum for parallel construction
 
 ### 4. Work Stealing Tests
 ```bash
 ./build/software_tester "[work-stealing]"
 ```
-**Περιγραφή**: Έλεγχος του work stealing coordinator για δυναμική κατανομή φορτίου
+**Description**: Tests for the work-stealing coordinator for dynamic work distribution
 
 ### 5. Bloom Filter Tests
 ```bash
 ./build/software_tester "[bloom]"
 ```
-**Περιγραφή**: Έλεγχος των bloom filters για early rejection στα joins
+**Description**: Tests for bloom filters used for early rejection during joins
 
 ### 6. Late Materialization Tests
 ```bash
 ./build/software_tester "[late-materialization]"
 ```
-**Περιγραφή**: Έλεγχος της late materialization για αναβολή πρόσβασης σε στήλες
+**Description**: Tests for late materialization to defer column access
 
 ### 7. Columnar Storage Tests
 ```bash
 ./build/software_tester "[columnar]"
 ```
-**Περιγραφή**: Έλεγχος του columnar storage layout και cache efficiency
+**Description**: Tests for the columnar storage layout and cache efficiency
 
 ### 8. Zero-Copy INT32 Tests
 ```bash
 ./build/software_tester "[zero-copy]"
 ```
-**Περιγραφή**: Έλεγχος της zero-copy βελτιστοποίησης για INT32 στήλες χωρίς NULLs
+**Description**: Tests for the zero-copy optimization for INT32 columns without NULLs
 
 ### 9. Hash Table Tests
 ```bash
 ./build/software_tester "[hashtable]"
 ```
-**Περιγραφή**: Έλεγχος των πραγματικών hash table implementations (Unchained)
+**Description**: Tests for the actual hash table implementations (Unchained)
 
 ### 10. Plan & Config Tests
 ```bash
 ./build/software_tester "[plan]"
 ./build/software_tester "[config]"
 ```
-**Περιγραφή**: Έλεγχος του query plan construction και configuration flags
+**Description**: Tests for the query plan construction API and configuration flags
 
 ### 11. Value Type Tests
 ```bash
 ./build/software_tester "[value]"
 ```
-**Περιγραφή**: Έλεγχος του compact value_t representation (64-bit payload)
+**Description**: Tests for the compact `value_t` representation (64-bit payload)
 
 ---
 
-## Αναλυτική Περιγραφή Tests
+## Detailed Test Descriptions
 
-### 📊 Κατηγορία 1: Hash Quality (4 tests)
-**Αρχείο**: `tests/software_tester.cpp`
 
-#### Στόχος
-Έλεγχος της ποιότητας των hash functions που χρησιμοποιούνται στο σύστημα για διάφορους τύπους κλειδιών.
+### 📊 Category 1: Hash Quality (4 tests)
+**File**: `tests/software_tester.cpp`
+
+#### Goal
+Checks the quality of the hash functions used by the system for various key types.
 
 #### Tests
 
 1. **Hash quality: int32_t**
-   - Ελέγχει collision rate, κατανομή buckets (chi-squared test), και avalanche effect για INT32
-   - Επιτρεπτό collision rate: < 6%
+   - Checks collision rate, bucket distribution (chi-squared test), and avalanche effect for INT32
+   - Allowed collision rate: < 6%
 
 2. **Hash quality: int64_t**
-   - Όμοιος έλεγχος για INT64 κλειδιά
-   - Επαληθεύει ομοιόμορφη κατανομή σε hash table
+   - Same checks for INT64 keys
+   - Verifies uniform distribution across hash table
 
 3. **Hash quality: double**
-   - Έλεγχος για floating-point κλειδιά
-   - Avalanche test: αλλαγή 1 bit → αλλαγή πολλών bits στο hash
+   - Checks for floating-point keys
+   - Avalanche test: flipping 1 bit should change many bits in the hash
 
 4. **Hash quality: string**
-   - Πιο σύνθετος έλεγχος για string κλειδιά μεταβλητού μήκους
-   - **Σημείωση**: Αποτυγχάνει συχνά λόγω αυστηρού chi-squared threshold (προϋπάρχον θέμα)
+   - More involved checks for variable-length string keys
+   - **Note**: This test often fails due to a strict chi-squared threshold (pre-existing issue)
 
 ---
 
-### 🧱 Κατηγορία 2: Slab Allocator (9 tests)
-**Αρχείο**: `tests/software_tester/slab_allocator_tests.cpp`
+### 🧱 Category 2: Slab Allocator (9 tests)
+**File**: `tests/software_tester/slab_allocator_tests.cpp`
 
-#### Στόχος
-Έλεγχος του three-level slab allocator που χρησιμοποιείται για γρήγορη δέσμευση μνήμης στα joins.
+#### Goal
+Tests for the three-level slab allocator used for fast memory allocation in joins.
 
-#### Αρχιτεκτονική
+#### Architecture
 ```
 Thread-local → Global L1 Cache → Global L2 Pool
 ```
@@ -151,127 +152,127 @@ Thread-local → Global L1 Cache → Global L2 Pool
 #### Tests
 
 1. **Basic allocation**
-   - Απλή δέσμευση μνήμης και έλεγχος ότι επιστρέφεται μη-null pointer
+   - Simple allocation and check that a non-null pointer is returned
 
 2. **Alignment verification**
-   - Επαληθεύει ότι η δεσμευμένη μνήμη είναι σωστά aligned (π.χ. 8-byte για int64_t)
+   - Verifies that allocated memory is correctly aligned (e.g., 8-byte for int64_t)
 
 3. **Large allocation**
-   - Δέσμευση μεγάλου block (>1MB) - πρέπει να fallback σε system allocator
+   - Allocate a large block (>1MB) and ensure it falls back to the system allocator
 
 4. **Multiple sequential allocations**
-   - Πολλαπλές διαδοχικές δεσμεύσεις - ελέγχει bump pointer advancement
+   - Multiple consecutive allocations - checks bump pointer advancement
 
 5. **Dealloc is no-op**
-   - Ο slab allocator δεν κάνει deallocation (bump allocator design)
+   - The slab allocator does not perform deallocation (bump allocator design)
 
 6. **enabled() returns true**
-   - Επαληθεύει ότι ο allocator είναι ενεργοποιημένος στο build
+   - Verifies that the allocator is enabled in this build
 
 7. **Thread-local isolation**
-   - Κάθε thread έχει δικό του slab - δεν μοιράζονται μνήμη
+   - Each thread has its own slab; slabs are not shared between threads
 
 8. **global_block_size() returns reasonable value**
-   - Το μέγεθος του global block είναι λογικό (π.χ. 256KB - 4MB)
+   - The global block size is reasonable (e.g., 256KB - 4MB)
 
 9. **Allocation with varying alignments**
-   - Δοκιμή διαφόρων alignments (1, 4, 8, 16 bytes)
+   - Test allocations with various alignments (1, 4, 8, 16 bytes)
 
 ---
 
-### 🔀 Κατηγορία 3: Partitioned Build (9 tests)
-**Αρχείο**: `tests/software_tester/partitioned_build_tests.cpp`
+### 🔀 Category 3: Partitioned Build (9 tests)
+**File**: `tests/software_tester/partitioned_build_tests.cpp`
 
-#### Στόχος
-Έλεγχος του partitioned hash table build που χρησιμοποιεί prefix-sum για να κατανείμει entries σε συνεχόμενη μνήμη.
+#### Goal
+Tests for the partitioned hash table build that uses a prefix-sum to distribute entries into contiguous memory.
 
-#### Τεχνική
-- **Phase 1**: Histogram - μετρά entries ανά partition
-- **Phase 2**: Prefix-sum - υπολογίζει offsets
-- **Phase 3**: Scatter - τοποθετεί entries στις σωστές θέσεις
+#### Technique
+- **Phase 1**: Histogram - counts entries per partition
+- **Phase 2**: Prefix-sum - computes offsets
+- **Phase 3**: Scatter - places entries into their target positions
 
 #### Tests
 
 1. **Phase correctness with small dataset**
-   - Επαληθεύει ότι οι 3 φάσεις δουλεύουν σωστά
+   - Verifies the three phases operate correctly
 
 2. **Contiguous tuple storage**
-   - Τα tuples της ίδιας partition είναι συνεχόμενα στη μνήμη (cache-friendly)
+   - Tuples belonging to the same partition are stored contiguously in memory (cache-friendly)
 
 3. **Prefix sum correctness**
-   - Ο prefix-sum υπολογισμός είναι ακριβής
+   - Prefix-sum calculation is correct
 
 4. **With duplicates**
-   - Χειρισμός duplicate κλειδιών (πολλά tuples με ίδιο hash prefix)
+   - Handling duplicate keys (many tuples with the same hash prefix)
 
 5. **Empty table**
-   - Edge case: κενό input
+   - Edge case: empty input
 
 6. **Single entry**
-   - Edge case: μόνο ένα tuple
+   - Edge case: single tuple
 
 7. **Large dataset (1000 entries)**
-   - Stress test με μεγαλύτερο dataset
+   - Stress test with a larger dataset
 
 8. **Collision handling**
-   - Πολλά κλειδιά που πηγαίνουν στο ίδιο partition
+   - Many keys map to the same partition
 
 9. **Memory efficiency**
-   - Ελέγχει ότι δεν σπαταλάται μνήμη (tight packing)
+   - Checks that memory is not wasted (tight packing)
 
 ---
 
-### 🔄 Κατηγορία 4: Work Stealing (9 tests)
-**Αρχείο**: `tests/software_tester/work_stealing_tests.cpp`
+### 🔄 Category 4: Work Stealing (9 tests)
+**File**: `tests/software_tester/work_stealing_tests.cpp`
 
-#### Στόχος
-Έλεγχος του work stealing coordinator που επιτρέπει δυναμική κατανομή φορτίου μεταξύ threads στο probe phase.
+#### Goal
+Tests for the work-stealing coordinator that enables dynamic workload distribution among threads during the probe phase.
 
-#### Αλγόριθμος
-- Atomic counter για να "κλέβουν" threads blocks δουλειάς
-- Ελαχιστοποιεί synchronization overhead
-- Καλύτερη load balancing από static partitioning
+#### Algorithm
+- Atomic counter for threads to "steal" work blocks
+- Minimizes synchronization overhead
+- Better load balancing than static partitioning
 
 #### Tests
 
 1. **steal_block with valid work range**
-   - Ένα thread κλέβει ένα block εργασίας επιτυχώς
+   - A thread successfully steals a work block
 
 2. **Sequential block stealing**
-   - Διαδοχική κλοπή πολλών blocks από το ίδιο thread
+   - Sequential stealing of multiple blocks by the same thread
 
 3. **Block boundaries**
-   - Τα όρια των blocks είναι σωστά (begin < end)
+   - Block boundaries are correct (begin < end)
 
 4. **Exhaustion returns false**
-   - Όταν τελειώσει η δουλειά, επιστρέφει false
+   - When the work is finished, returns false
 
 5. **Concurrent stealing (2 threads)**
-   - Δύο threads κλέβουν ταυτόχρονα - κανένα overlap
+   - Two threads steal concurrently - no overlap
 
 6. **Concurrent stealing (4 threads) - stress**
-   - Περισσότερα threads - πιο έντονος ανταγωνισμός
+   - More threads - higher contention
 
 7. **Work distribution fairness**
-   - Τα threads παίρνουν περίπου ίση ποσότητα δουλειάς
+   - Threads receive approximately equal shares of work
 
 8. **get_block_size() respects config**
-   - Το μέγεθος block σέβεται την configuration
+   - Block size respects the configuration
 
 9. **No work skipped or duplicated**
-   - Όλες οι γραμμές επεξεργάζονται ακριβώς μία φορά
+   - All rows/lines are processed exactly once
 
 ---
 
-### 🌸 Κατηγορία 5: Bloom Filters (13 tests)
-**Αρχεία**: 
+### 🌸 Category 5: Bloom Filters (13 tests)
+**Files**: 
 - `tests/software_tester/bloom_filter_tests.cpp` (9 tests - old implementation)
 - `tests/software_tester/indexing_optimization_tests.cpp` (4 tests - GlobalBloom)
 
-#### Στόχος
-Έλεγχος των bloom filters που χρησιμοποιούνται για early rejection στο probe phase (αποφυγή hash table lookups που θα αποτύχουν).
+#### Goal
+Tests for the bloom filters used for early rejection during the probe phase (avoiding unnecessary hash table lookups).
 
-#### Τεχνική
+#### Technique
 - Compact bit vector (2^N bits)
 - Multiple hash functions
 - False positives OK, false negatives NOT OK
@@ -279,104 +280,104 @@ Thread-local → Global L1 Cache → Global L2 Pool
 #### Tests (bloom_filter_tests.cpp)
 
 1. **Basic tag and mask operations**
-   - Υπολογισμός tag και mask από hash value
+   - Computes tag and mask from hash value
 
 2. **Multiple tags in single bloom**
-   - Προσθήκη πολλών tags - όλα retrievable
+   - Adding multiple tags - all retrievable
 
 3. **Collision detection**
-   - Δύο διαφορετικά κλειδιά μπορεί να έχουν colliding bits
+   - Two different keys may have colliding bits
 
 4. **False positive rate estimation**
-   - Μέτρηση false positive rate (πρέπει < 10% για typical workload)
+   - Measure false positive rate (should be < 10% for typical workload)
 
 5. **All bits set (saturation)**
-   - Extreme case: όλα τα bits = 1 → πάντα returns true
+   - Extreme case: all bits = 1 → always returns true
 
 6. **No bits set (empty)**
-   - Empty bloom → πάντα returns false
+   - Empty bloom → always returns false
 
 7. **Tag extraction from hash**
-   - Σωστή εξαγωγή tag bits από hash value
+   - Correct extraction of tag bits from hash value
 
 8. **Independent bit positions**
-   - Οι hash functions δίνουν independent bit positions
+   - Hash functions provide independent bit positions
 
 9. **Global bloom configuration**
-   - Σταθερό μέγεθος bloom: `bloom.init(4)` (χωρίς env), δύο θέσεις ανά key
+   - Fixed bloom size: `bloom.init(4)` (no env), two positions per key
 
 #### Tests (GlobalBloom - indexing_optimization_tests.cpp)
 
 10. **GlobalBloom: basic add and contains**
-    - `add_i32()`, `maybe_contains_i32()` - βασική λειτουργία
+   - `add_i32()`, `maybe_contains_i32()` - basic operation
 
 11. **GlobalBloom: false positive rate**
-    - Μέτρηση FP rate με 1000 keys → πρέπει < 10%
+   - Measure FP rate with 1000 keys → should be < 10%
 
 12. **GlobalBloom: hash independence**
-    - Κοντινές τιμές δεν είναι όλες present (καλό hashing)
+   - Nearby values are not all present (good hashing)
 
 13. **JoinConfig: bloom filter configuration**
-   - Δεν υπάρχουν πλέον config functions για global bloom. Η υλοποίηση είναι σταθερή.
+   - There are no longer config functions for global bloom. The implementation is fixed.
 
 ---
 
-### 📦 Κατηγορία 6: Late Materialization (10 tests)
-**Αρχεία**:
+### 📦 Category 6: Late Materialization (10 tests)
+**Files**:
 - `tests/software_tester/late_materialization_tests.cpp` (9 tests)
 - `tests/software_tester/indexing_optimization_tests.cpp` (1 test)
 
-#### Στόχος
-Έλεγχος της late materialization τεχνικής: strings αποθηκεύονται ως compressed references (64-bit), και materialize μόνο όταν χρειάζονται στο output.
+#### Goal
+Tests for the late materialization technique: strings are stored as compact 64-bit references and materialized only when needed in the output.
 
-#### Τεχνική
+#### Technique
 - **PackedStringRef**: 64 bits = {table_id, column_id, page_id, slot}
-- Αποφυγή string copying μέχρι το τελικό output
-- Μείωση cache pressure
+- Avoid string copying until the final output
+- Reduce cache pressure
 
 #### Tests
 
 1. **PackedStringRef: packing string reference**
-   - Συμπίεση (table, col, page, slot) σε 64-bit
+   - Packing (table, col, page, slot) into 64-bit
 
 2. **Null flag handling**
-   - Το bit pattern UINT64_MAX σημαίνει NULL
+   - The bit pattern UINT64_MAX means NULL
 
 3. **Multiple references uniqueness**
-   - Διαφορετικά strings → διαφορετικά refs
+   - Different strings → different refs
 
 4. **Compact 64-bit storage**
-   - Μόνο 8 bytes ανά string reference
+   - Only 8 bytes per string reference
 
 5. **Zero-copy string handling benefit**
-   - Δεν κάνουμε memcpy των strings
+   - No memcpy of strings
 
 6. **Resolve string reference**
-   - `StringRefResolver` μετατρέπει ref → actual string
+   - `StringRefResolver` converts ref → actual string
 
 7. **Deferred materialization strategy**
-   - Strings materialize μόνο στο output, όχι στα intermediate results
+   - Strings materialize only in the output, not in intermediate results
 
 8. **Column-wise storage benefits**
-   - String refs σε ξεχωριστή στήλη από τα join keys
+   - String refs are stored in a separate column from the join keys
 
 9. **Memory efficiency with variable-length fields**
-   - Μεταβλητού μήκους strings → σταθερού μήκους refs
+   - Variable-length strings → fixed-size refs
 
-10. **Late Materialization: deferred column access concept** (στο indexing_optimization_tests.cpp)
-    - Concept test: join χρησιμοποιεί μόνο key column, payload materialize αργότερα
+10. **Late Materialization: deferred column access concept** (in indexing_optimization_tests.cpp)
+   - Concept test: join uses only the key column; payloads are materialized later
 
 ---
 
-### 🗂️ Κατηγορία 7: Columnar Storage (16 tests)
-**Αρχεία**:
+### 🗂️ Category 7: Columnar Storage (16 tests)
+**Files**:
 - `tests/software_tester/columnar_tests.cpp` (9 tests)
 - `tests/software_tester/indexing_optimization_tests.cpp` (7 tests)
 
-#### Στόχος
-Έλεγχος του columnar storage layout που βελτιώνει cache locality και επιτρέπει SIMD operations.
+#### Goal
+Tests for the columnar storage layout that improves cache locality and enables SIMD operations.
 
-#### Αρχιτεκτονική
+#### Architecture
 ```
 Row-store:    [id, name, age][id, name, age]...
 Column-store: [id, id, id...][name, name...][age, age...]
@@ -385,39 +386,39 @@ Column-store: [id, id, id...][name, name...][age, age...]
 #### Tests (columnar_tests.cpp)
 
 1. **Column data organization**
-   - Δεδομένα οργανωμένα σε στήλες, όχι γραμμές
+   - Data organized by columns rather than rows
 
 2. **Fixed-length column storage**
-   - INT32, INT64 → σταθερού μήκους στήλες
+   - INT32, INT64 → fixed-length columns
 
 3. **Variable-length column with references**
-   - Strings → references σε string pool
+   - Strings → references into a string pool
 
 4. **Page-based organization**
-   - Κάθε στήλη χωρισμένη σε pages (π.χ. 1024 values/page)
+   - Each column is split into pages (e.g., 1024 values/page)
 
 5. **Column projection (selective columns)**
-   - Διαβάζουμε μόνο τις στήλες που χρειαζόμαστε (I/O saving)
+   - We read only the columns we need (I/O saving)
 
 6. **Cache efficiency with column-major layout**
-   - Sequential scan → cache-friendly (όλα τα values της στήλης συνεχόμενα)
+   - Sequential scan → cache-friendly (all values of the column are contiguous)
 
 7. **Null handling in columns**
-   - NULL bitmap για κάθε στήλη
+   - NULL bitmap for each column
 
 8. **Multiple column iteration (tuple construction)**
-   - Ανακατασκευή tuples από πολλές στήλες
+   - Reconstruct tuples from multiple columns
 
 9. **Memory efficiency vs row store**
-   - Compression-friendly (όμοια δεδομένα μαζί)
+   - Compression-friendly (similar data grouped together)
 
 #### Tests (indexing_optimization_tests.cpp)
 
 10. **ColumnarTable: column buffer creation**
-    - Δημιουργία `ColumnBuffer` με `column_t`
+   - Create `ColumnBuffer` from `column_t`
 
 11. **ColumnarTable: zero-copy INT32 detection**
-    - Flag `is_zero_copy` για βελτιστοποίηση
+   - Flag `is_zero_copy` for optimization
 
 12. **ColumnarTable: value_t access patterns**
     - `column_t::get()` method, multi-page access
@@ -426,28 +427,28 @@ Column-store: [id, id, id...][name, name...][age, age...]
     - `value_t::make_null()`, `is_null()`
 
 14. **ColumnarTable: cached page index optimization**
-    - Sequential access → cached page index (αποφυγή binary search)
+   - Sequential access → cached page index (avoid binary search)
 
 15. **ColumnBuffer: basic structure**
     - `num_rows`, `columns` vector
 
 16. **ColumnBuffer: multi-column layout**
-    - Πολλές στήλες INT32 στο ίδιο buffer
+   - Many INT32 columns in the same buffer
 
 ---
 
-### ⚡ Κατηγορία 8: Zero-Copy INT32 (10 tests)
-**Αρχεία**:
+### ⚡ Category 8: Zero-Copy INT32 (10 tests)
+**Files**:
 - `tests/software_tester/zero_copy_int32_tests.cpp` (9 tests)
 - `tests/software_tester/indexing_optimization_tests.cpp` (1 test)
 
-#### Στόχος
-Έλεγχος της zero-copy βελτιστοποίησης για INT32 στήλες χωρίς NULLs: απευθείας πρόσβαση στις pages χωρίς materialization σε `value_t`.
+#### Goal
+Test the zero-copy optimization for INT32 columns without NULLs: direct access to pages without materializing into `value_t`.
 
-#### Τεχνική
-- Αντί για: `page → value_t → int32_t`
-- Κάνουμε: `page → int32_t` (direct pointer arithmetic)
-- **Προϋπόθεση**: INT32 column, no NULLs
+#### Technique
+- Instead of: `page → value_t → int32_t`
+- We do: `page → int32_t` (direct pointer arithmetic)
+- **Precondition**: INT32 column, no NULLs
 
 #### Tests
 
@@ -455,99 +456,99 @@ Column-store: [id, id, id...][name, name...][age, age...]
    - Pointer cast: `reinterpret_cast<const int32_t*>(page + 4)`
 
 2. **Null handling for zero-copy INT32**
-   - Εάν υπάρχουν NULLs → fallback σε materialized path
+   - If NULLs are present → fallback to the materialized path
 
 3. **Pointer arithmetic for range access**
-   - Sequential scan με pointer increment
+   - Sequential scan with pointer increment
 
 4. **Memory alignment preservation**
-   - INT32 data aligned σε 4-byte boundaries
+   - INT32 data aligned on 4-byte boundaries
 
 5. **No copy overhead**
-   - Μηδενικό memcpy, μηδενική materialization
+   - Zero memcpy, zero materialization
 
 6. **Multi-column zero-copy**
-   - Πολλές INT32 στήλες → όλες zero-copy
+   - Many INT32 columns → all zero-copy
 
 7. **Constraint - only for INT32 without NULLs**
-   - Τεκμηρίωση των constraints
+   - Documentation of the constraints
 
 8. **Optimization for hash build**
    - `build_from_zero_copy_int32()` interface
 
 9. **ZeroCopyInt32: multi-column zero-copy** (repeat)
-   - Stress test με πολλές στήλες
+   - Stress test with many columns
 
-10. **Zero-copy page build detection** (στο indexing_optimization_tests.cpp)
-   - Αυτόματη ανίχνευση: `is_zero_copy && src_column != nullptr && page_offsets.size() >= 2`
+10. **Zero-copy page build detection** (in indexing_optimization_tests.cpp)
+   - Automatic detection: `is_zero_copy && src_column != nullptr && page_offsets.size() >= 2`
 
 ---
 
-### 🔑 Κατηγορία 9: Hash Table Implementations (5 tests)
-**Αρχείο**: `tests/software_tester/hashtable_algorithms_tests.cpp`
+### 🔑 Category 9: Hash Table Implementations (5 tests)
+**File**: `tests/software_tester/hashtable_algorithms_tests.cpp`
 
-#### Στόχος
-Έλεγχος των **πραγματικών** hash table implementations που χρησιμοποιούνται στο join execution engine.
+#### Goal
+Verify the actual hash table implementations used in the join execution engine.
 
 #### Implementations
 - **UnchainedHashTable** (default) - flat layout, open addressing
-- RobinHood, Cuckoo, Hopscotch (υπάρχουν wrappers αλλά δεν τεστάρονται λόγω redefinition conflicts)
+- RobinHood, Cuckoo, Hopscotch (wrappers exist but are not tested due to redefinition conflicts)
 
 #### Tests
 
 1. **UnchainedHashTable: basic build and probe**
-   - `build_from_entries()`, `probe()` - βασική λειτουργία
-   - Επαλήθευση: σωστό key, σωστό row_id
+   - `build_from_entries()`, `probe()` - basic operation
+   - Verification: correct key, correct row_id
 
 2. **UnchainedHashTable: collision handling**
-   - 1000 entries - πολλές συγκρούσεις
-   - Όλα τα κλειδιά πρέπει να είναι retrievable
+   - 1000 entries - many collisions
+   - All keys must be retrievable
 
 3. **UnchainedHashTable: duplicate keys**
-   - Το ίδιο key με διαφορετικά row_ids → όλα στο bucket
+   - Same key with different row_ids → all in the bucket
 
 4. **UnchainedHashTable: missing key**
-   - Probe για κλειδί που δεν υπάρχει → `nullptr` ή `len=0`
+   - Probe for a missing key → `nullptr` or `len=0`
 
 5. **HashTable: load factor stress test**
-   - 5000 entries - υψηλό load factor
-   - Δοκιμή sampling (κάθε 17ο entry)
+   - 5000 entries - high load factor
+   - Sampling test (every 17th entry)
 
-**Σημείωση**: Τα tests για RobinHood/Cuckoo/Hopscotch είναι commented out λόγω redefinition errors (κάθε wrapper ορίζει το δικό του `create_hashtable()`). Μπορούν να τεσταριστούν αλλάζοντας το include στο `execute_default.cpp`.
+**Note**: Tests for RobinHood/Cuckoo/Hopscotch are commented out due to redefinition errors (each wrapper defines its own `create_hashtable()`). They can be tested by changing the include in `execute_default.cpp`.
 
 ---
 
-### 📋 Κατηγορία 10: Plan & Configuration (4 tests)
-**Αρχείο**: `tests/software_tester/indexing_optimization_tests.cpp`
+### 📋 Category 10: Plan & Configuration (4 tests)
+**File**: `tests/software_tester/indexing_optimization_tests.cpp`
 
-#### Στόχος
-Έλεγχος του query plan construction API και των configuration flags.
+#### Goal
+Test the query plan construction API and the configuration flags.
 
 #### Tests
 
 1. **Plan: basic scan node creation**
    - `plan.new_scan_node(table_id, output_attrs)`
-   - Επαλήθευση: node_id, nodes.size()
+   - Verification: node_id, nodes.size()
 
 2. **Plan: basic join node creation**
    - `plan.new_join_node(build_left, left, right, left_attr, right_attr, output_attrs)`
-   - Δημιουργία join tree: scan + scan → join
+   - Create join tree: scan + scan → join
 
 3. **Zero-copy page build detection**
-   - Αυτόματη ανίχνευση χωρίς flags
+   - Automatic detection without flags
 
 4. **Global bloom behavior**
-   - Σταθερό μέγεθος με `init(4)` — δεν υπάρχει παραμετροποίηση bits
+   - Fixed size with `init(4)` — no bit configuration
 
 ---
 
-### 🔤 Κατηγορία 11: Value Type (4 tests)
-**Αρχείο**: `tests/software_tester/indexing_optimization_tests.cpp`
+### 🔤 Category 11: Value Type (4 tests)
+**File**: `tests/software_tester/indexing_optimization_tests.cpp`
 
-#### Στόχος
-Έλεγχος του compact `value_t` representation που χρησιμοποιείται για να αποθηκεύσουμε τιμές σε 64 bits.
+#### Goal
+Tests the compact `value_t` representation used to store values in 64 bits.
 
-#### Σχεδιασμός
+#### Design
 ```cpp
 struct value_t {
     uint64_t raw;  // INT32 | PackedStringRef | NULL
@@ -564,17 +565,17 @@ struct value_t {
    - Compressed 64-bit representation
 
 3. **value_t: packed string ref with make_str_ref**
-   - `make_str_ref(table, col, page, slot)` - ένα API call
+   - `make_str_ref(table, col, page, slot)` - an API call
 
 4. **value_t: NULL value**
    - `make_null()` → `raw = UINT64_MAX`
    - `is_null()` check
 
-**Σημείωση**: Το σύστημα υποστηρίζει μόνο INT32 και string refs, όχι INT64/double (αφαιρέθηκαν για απλότητα).
+**Note**: The system supports only INT32 and string refs, not INT64/double (removed for simplicity).
 
 ---
 
-## Δομή Αρχείων
+## File Structure
 
 ```
 tests/
@@ -593,10 +594,10 @@ tests/
 
 ---
 
-## Τεχνικές Λεπτομέρειες
+## Technical Details
 
 ### Strict Integration Tests
-Τα tests στα αρχεία `hashtable_algorithms_tests.cpp` και `indexing_optimization_tests.cpp` είναι **strict integration tests** που χρησιμοποιούν τα πραγματικά APIs του codebase:
+The tests in `hashtable_algorithms_tests.cpp` and `indexing_optimization_tests.cpp` are **strict integration tests** that use the real APIs of the codebase:
 
 - ✅ `Contest::UnchainedHashTableWrapper<int32_t>`
 - ✅ `Contest::GlobalBloom`
@@ -605,11 +606,11 @@ tests/
 - ✅ `Contest::Plan`
 - ✅ Configuration functions: `req_build_from_pages_enabled()`, `join_global_bloom_enabled()`
 
-**Δεν** χρησιμοποιούν mock implementations (`std::unordered_map`, `std::vector`).
+They do not use mock implementations (`std::unordered_map`, `std::vector`).
 
 ### Test Framework
 - **Catch2 v3.8.0**
-- Tags για filtering: `[hashtable]`, `[bloom]`, `[zero-copy]`, etc.
+- Tags for filtering: `[hashtable]`, `[bloom]`, `[zero-copy]`, etc.
 - Reporters: `compact`, `console`, `junit`
 
 ### Modes
@@ -623,31 +624,31 @@ OPTIMIZED_PROJECT=1 ./build/fast plans.json
 
 ---
 
-## Προβλήματα & Λύσεις
+## Problems & Solutions
 
-### 1. Hash Quality String Test Αποτυγχάνει
-**Πρόβλημα**: Το chi-squared threshold είναι πολύ αυστηρό για string hashing.
+### 1. Hash Quality String Test Fails
+**Problem**: The chi-squared threshold is too strict for string hashing.
 
-**Λύση**: Προϋπάρχον θέμα - όχι κρίσιμο για την ορθότητα του συστήματος.
+**Solution**: Pre-existing issue — not critical for system correctness.
 
 ### 2. RobinHood/Cuckoo/Hopscotch Tests Disabled
-**Πρόβλημα**: Κάθε wrapper ορίζει `create_hashtable()` → redefinition error.
+**Problem**: Each wrapper defines `create_hashtable()` → redefinition error.
 
-**Λύση**: Τεστάρονται μόνο τα UnchainedHashTable tests. Για να τεστάρεις άλλο implementation, άλλαξε το include στο `execute_default.cpp` και rebuild.
+**Solution**: Only the UnchainedHashTable tests are run. To test another implementation, change the include in `execute_default.cpp` and rebuild.
 
 ### 3. Build Warnings (Narrowing Conversion)
-**Πρόβλημα**: `size_t` → `uint32_t` narrowing conversions.
+**Problem**: `size_t` → `uint32_t` narrowing conversions.
 
-**Λύση**: Μη κρίσιμα warnings - το σύστημα δουλεύει σωστά (row_ids < 2^32 στην πράξη).
+**Solution**: Non-critical warnings — the system works correctly (row_ids < 2^32 in practice).
 
 ---
 
 ## Performance Benchmarking
 
-Για να μετρήσεις την επίδοση των optimizations:
+To measure the performance of the optimizations:
 
 ```bash
-# Build σε Release mode
+# Build in Release mode
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
 # Modes benchmarking
@@ -657,12 +658,12 @@ OPTIMIZED_PROJECT=1 ./build/fast plans.json
 
 ---
 
-## Συμπέρασμα
+## Conclusion
 
-Το test suite καλύπτει **όλες** τις βασικές βελτιστοποιήσεις που αναφέρονται στο FINAL_COMPREHENSIVE_REPORT:
+The test suite covers the key optimizations listed in the FINAL_COMPREHENSIVE_REPORT:
 
 ✅ **Part 1**: Hash table algorithms (Unchained)  
 ✅ **Part 2**: Column-store, Late Materialization  
 ✅ **Part 3**: Parallelization (Work Stealing, Partitioned Build), Indexing (Zero-Copy, Bloom Filters)
 
-Όλα τα tests χρησιμοποιούν τα **πραγματικά APIs** του codebase, όχι mock implementations.
+All tests use the **real APIs** of the codebase, not mock implementations.

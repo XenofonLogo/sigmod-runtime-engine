@@ -1,4 +1,13 @@
-// join_telemetry.cpp — προαιρετικά στατιστικά για joins
+#include "join_telemetry.h"
+#include <cstdio>
+#include <cstdlib>
+#include <chrono>
+
+// join_telemetry.cpp - optional statistics for joins
+#include "join_telemetry.h"
+#include <cstdio>
+#include <cstdlib>
+#include <chrono>
 #include "join_telemetry.h"
 #include <cstdio>
 #include <cstdlib>
@@ -6,18 +15,18 @@
 
 namespace Contest {
 
-// Αυξανόμενο αναγνωριστικό ανά query (shared μεταξύ νημάτων)
+// Increasing identifier per query (shared across threads)
 static std::atomic<uint64_t> g_query_seq{0};
-// Μετρήσεις τηλεμετρίας αποθηκευμένες ανά thread για το τρέχον query
+// Telemetry measurements stored per-thread for the current query
 static thread_local QueryTelemetry g_qt;
-// ID τρέχοντος query (ανά thread), συντονίζεται με g_query_seq
+// Current query ID (per thread), coordinated with g_query_seq
 static thread_local uint64_t g_query_id = 0;
-// Χρονική στιγμή έναρξης query (ανά thread)
+// Query start time (per thread)
 static thread_local std::chrono::steady_clock::time_point g_query_start;
 
 bool join_telemetry_enabled() {
-    // Προαιρετικά stats για να δούμε αν είμαστε memory-bandwidth bound.
-    // Default: απενεργοποιημένο. JOIN_TELEMETRY=1 για ενεργοποίηση (οτιδήποτε μη '0').
+    // Optional stats to check if we are memory-bandwidth bound.
+    // Default: disabled. Set JOIN_TELEMETRY=1 to enable (any non-'0' value).
     static const bool enabled = [] {
         const char* v = std::getenv("JOIN_TELEMETRY");
         if (!v) return false;  // Default to disabled
@@ -27,8 +36,8 @@ bool join_telemetry_enabled() {
 }
 
 void qt_begin_query() {
-    g_query_id = ++g_query_seq;   // Πάρε νέο ID (atomic increment)
-    g_qt = QueryTelemetry{};      // Μηδενισμός/επανεκκίνηση μετρήσεων
+    g_query_id = ++g_query_seq;   // Get new ID (atomic increment)
+    g_qt = QueryTelemetry{};      // Reset/restart measurements
     g_query_start = std::chrono::steady_clock::now();
 }
 
@@ -44,14 +53,14 @@ void qt_add_join(uint64_t build_rows,
     const uint64_t out_cells = out_rows * out_cols;
     g_qt.out_cells += out_cells;
 
-    // Εκτίμηση μετακινούμενων bytes για απλή εικόνα bandwidth
+    // Estimate moved bytes to provide a simple view of bandwidth
     const uint64_t bytes_keys = (build_rows + probe_rows) * 4ull;   // INT32 join keys (4 bytes)
-    const uint64_t bytes_out_write = out_cells * 8ull;              // Γραφές value_t (8 bytes)
-    const uint64_t bytes_out_read = out_cells * 8ull;               // Αναγνώσεις value_t (8 bytes)
+    const uint64_t bytes_out_write = out_cells * 8ull;              // Writes of value_t (8 bytes)
+    const uint64_t bytes_out_read = out_cells * 8ull;               // Reads of value_t (8 bytes)
 
-    // Strict min: κλειδιά + γραφές εξόδου (κατώτερο όριο)
-    g_qt.bytes_strict_min += bytes_keys + bytes_out_write;
-    // Likely: κλειδιά + αναγνώσεις + γραφές (πιο ρεαλιστικό για hash join)
+    // Baseline min: keys + output writes (lower bound)
+    g_qt.bytes_baseline_min += bytes_keys + bytes_out_write;
+    // Likely: keys + reads + writes (more realistic for hash joins)
     g_qt.bytes_likely += bytes_keys + bytes_out_read + bytes_out_write;
 }
 
@@ -76,12 +85,12 @@ void qt_end_query() {
         return seconds * 1000.0;
     };
 
-    // Υποθετικά όρια μόνο με βάση bandwidth (αισιόδοξα για hash joins)
+    // Hypothetical bounds based on bandwidth only (optimistic for hash joins)
     const double bw10 = 10.0;
     const double bw20 = 20.0;
     const double bw40 = 40.0;
 
-    // Γραμμή σύνοψης πλήθους πράξεων και γραμμών
+    // Summary line for counts and row metrics
     std::fprintf(stderr,
                  "[telemetry q%llu] joins=%llu build=%llu probe=%llu out=%llu out_cells=%llu sel=%.4f avg_out_cols=%.2f\n",
                  (unsigned long long)g_query_id,
@@ -93,31 +102,31 @@ void qt_end_query() {
                  selectivity,
                  avg_out_cols);
 
-    // Εκτίμηση όγκου δεδομένων σε GiB (κατώτερο και πιθανό σενάριο)
+    // Estimate data volume in GiB (baseline and likely scenarios)
     std::fprintf(stderr,
-                 "[telemetry q%llu] bytes_strict_min=%.3f GiB  bytes_likely=%.3f GiB\n",
+                 "[telemetry q%llu] bytes_baseline_min=%.3f GiB  bytes_likely=%.3f GiB\n",
                  (unsigned long long)g_query_id,
-                 bytes_to_gib(g_qt.bytes_strict_min),
+                 bytes_to_gib(g_qt.bytes_baseline_min),
                  bytes_to_gib(g_qt.bytes_likely));
 
-    // Πραγματικός χρόνος και μετρημένο bandwidth
+    // Actual elapsed time and measured bandwidth
     std::fprintf(stderr,
-                 "[telemetry q%llu] elapsed=%.3f ms  bw_strict=%.2f GB/s  bw_likely=%.2f GB/s\n",
+                 "[telemetry q%llu] elapsed=%.3f ms  bw_baseline=%.2f GB/s  bw_likely=%.2f GB/s\n",
                  (unsigned long long)g_query_id,
                  elapsed_ms,
-                 safe_div(g_qt.bytes_strict_min, elapsed_s),
+                 safe_div(g_qt.bytes_baseline_min, elapsed_s),
                  safe_div(g_qt.bytes_likely, elapsed_s));
 
-    // Θεωρητικά κάτω όρια χρόνου (μόνο bandwidth) για strict bytes
+    // Theoretical lower bounds (bandwidth-only) for baseline bytes
     std::fprintf(stderr,
-                 "[telemetry q%llu] BW LB strict: %.2f/%.2f/%.2f ms @ %.0f/%.0f/%.0f GB/s\n",
+                 "[telemetry q%llu] BW LB baseline: %.2f/%.2f/%.2f ms @ %.0f/%.0f/%.0f GB/s\n",
                  (unsigned long long)g_query_id,
-                 ms_at_gbps(g_qt.bytes_strict_min, bw10),
-                 ms_at_gbps(g_qt.bytes_strict_min, bw20),
-                 ms_at_gbps(g_qt.bytes_strict_min, bw40),
+                 ms_at_gbps(g_qt.bytes_baseline_min, bw10),
+                 ms_at_gbps(g_qt.bytes_baseline_min, bw20),
+                 ms_at_gbps(g_qt.bytes_baseline_min, bw40),
                  bw10, bw20, bw40);
 
-    // Θεωρητικά κάτω όρια χρόνου (μόνο bandwidth) για likely bytes
+    // Theoretical lower bound times (bandwidth-only) for likely bytes
     std::fprintf(stderr,
                  "[telemetry q%llu] BW LB likely: %.2f/%.2f/%.2f ms @ %.0f/%.0f/%.0f GB/s\n",
                  (unsigned long long)g_query_id,

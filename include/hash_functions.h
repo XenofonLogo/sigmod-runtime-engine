@@ -7,23 +7,21 @@ namespace Hash {
 //
 // Fibonacci (Knuth) multiplicative hashing
 //
-// Πρόκειται για μια από τις ταχύτερες και καλύτερα κατανεμημένες
-// 32-bit → 64-bit hash functions.
-// 
-// Χρησιμοποιεί τον "magic constant" του Donald Knuth:
-//   11400714819323198485ULL
-// ο οποίος είναι 2^64 * (φ - 1),
-// όπου φ = χρυσή τομή.
+// One of the fastest and best-distributed 32-bit -> 64-bit hash functions.
 //
-// Πλεονεκτήματα:
-// - Εξαιρετική κατανομή (bit diffusion)
-// - Πάρα πολύ γρήγορη (1 multiplication)
-// - Ιδανική για hashtable prefix partitioning
+// Uses Donald Knuth's "magic constant":
+//   11400714819323198485ULL
+// which is 2^64 * (φ - 1), where φ is the golden ratio.
+//
+// Advantages:
+// - Excellent distribution (bit diffusion)
+// - Very fast (single multiplication)
+// - Well-suited for hashtable prefix partitioning
 //
 
 struct Fibonacci32 {
     inline uint64_t operator()(int32_t x) const noexcept {
-        // Μετατρέπουμε το signed int32 σε uint32 για σταθερή bit-αναπαράσταση.
+        // Convert signed int32 to uint32 for stable bit representation.
         uint64_t v = static_cast<uint64_t>(static_cast<uint32_t>(x));
 
         // Knuth multiplicative hashing
@@ -32,10 +30,10 @@ struct Fibonacci32 {
 };
 
 //
-// CRC32 (προαιρετικός hash), π.χ. για benchmarking
+// CRC32 (optional hash), e.g. for benchmarking
 //
-// Είναι βαρύτερος αλλά έχει άλλες χρήσεις (ελέγχους ακεραιότητας, SIMD CRC).
-// Δεν χρησιμοποιείται ως default μέσα στο project.
+// Heavier weight but useful for other purposes (integrity checks, SIMD CRC).
+// Not used as the project default.
 //
 //
 uint32_t crc32_u32(uint32_t x);
@@ -47,12 +45,12 @@ struct CRC32Hasher {
 };
 
 //
-// Επιλογή default hasher
+// Default hasher selection
 //
-// Εδώ ορίζουμε ποια hash function χρησιμοποιείται παντού.
-// Μετά από benchmark, επιλέξαμε το Fibonacci32.
+// Defines which hash function is used across the project.
+// After benchmarking we selected Fibonacci32.
 //
-// Αν χρειαστεί αλλαγή, αρκεί να αλλάξει αυτό το typedef.
+// To change the default, update this typedef.
 //
 using Hasher32 = Fibonacci32;
 

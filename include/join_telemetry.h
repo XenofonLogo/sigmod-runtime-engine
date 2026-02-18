@@ -6,30 +6,30 @@
 
 namespace Contest {
 
-// Συγκεντρωτικά μετρικά ενός query
+// Aggregate metrics for a query
 struct QueryTelemetry {
-    uint64_t joins = 0;            // Πλήθος joins
-    uint64_t build_rows = 0;       // Σύνολο γραμμών στην build πλευρά
-    uint64_t probe_rows = 0;       // Σύνολο γραμμών στην probe πλευρά
-    uint64_t out_rows = 0;         // Γραμμές εξόδου
-    uint64_t out_cells = 0;        // Κελιά εξόδου (rows * cols)
-    uint64_t bytes_strict_min = 0; // Ελάχιστα bytes (keys + writes)
-    uint64_t bytes_likely = 0;     // Εκτιμώμενα bytes (προσθήκη reads)
+    uint64_t joins = 0;            // Number of joins
+    uint64_t build_rows = 0;       // Total rows on the build side
+    uint64_t probe_rows = 0;       // Total rows on the probe side
+    uint64_t out_rows = 0;         // Output rows
+    uint64_t out_cells = 0;        // Output cells (rows * cols)
+    uint64_t bytes_baseline_min = 0; // Minimum bytes (keys + writes)
+    uint64_t bytes_likely = 0;     // Estimated bytes (including reads)
 };
 
-// Έλεγχος αν η τηλεμετρία είναι ενεργή (env JOIN_TELEMETRY, default on)
+// Check if telemetry is enabled (env JOIN_TELEMETRY, default disabled)
 bool join_telemetry_enabled();
 
-// Αρχικοποίηση τηλεμετρίας για νέο query
+// Initialize telemetry for a new query
 void qt_begin_query();
 
-// Καταγραφή μετρικών για ένα join
+// Record metrics for a join
 void qt_add_join(uint64_t build_rows,
                  uint64_t probe_rows,
                  uint64_t out_rows,
                  uint64_t out_cols);
 
-// Εκτύπωση σύνοψης τηλεμετρίας για το query
+// Print telemetry summary for the query
 void qt_end_query();
 
 } // namespace Contest

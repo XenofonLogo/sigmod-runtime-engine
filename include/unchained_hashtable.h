@@ -12,15 +12,15 @@
 
 /*
  * TupleEntry:
- * Απλή δομή που αποθηκεύει:
- * - key: το κλειδί της πλειάδας
- * - row_id: τη θέση της πλειάδας στο αρχικό input
+ * Simple struct that stores:
+ * - key: the tuple's key
+ * - row_id: the tuple's position in the original input
  *
- * Χρησιμοποιείται στο ενιαίο buffer των tuples.
- * 
- * ΣΗΜΑΝΤΙΚΟ: Χρησιμοποιούμε uint32_t για row_id (όχι size_t)
- * ώστε να είναι συμβατό με το HashEntry struct και να αποφύγουμε
- * memory corruption κατά το reinterpret_cast στο wrapper.
+ * Used in the contiguous tuples buffer.
+ *
+ * IMPORTANT: we use uint32_t for row_id (not size_t)
+ * to remain compatible with the HashEntry struct and avoid
+ * memory corruption during reinterpret_cast in the wrapper.
  */
 template<typename Key, typename Hasher = Hash::Hasher32>
 struct TupleEntry {
@@ -30,32 +30,32 @@ struct TupleEntry {
 
 /*
  * DirectoryEntry:
- * Περιέχει το εύρος [begin_idx, end_idx) των πλειάδων
- * που μοιράζονται το ίδιο prefix του hash.
+ * Contains the range [begin_idx, end_idx) of tuples
+ * that share the same hash prefix.
  *
- * Επίσης αποθηκεύει ένα 16-bit bloom filter για γρήγορο φιλτράρισμα.
+ * Also stores a 16-bit bloom filter for fast rejection.
  */
 struct DirectoryEntry {
-    std::size_t begin_idx;  // δείκτης έναρξης στο contiguous buffer
-    std::size_t end_idx;    // δείκτης τέλους στο buffer
+    std::size_t begin_idx;  // start index in the contiguous buffer
+    std::size_t end_idx;    // end index in the buffer
     uint16_t bloom;         // 16-bit bloom filter (4 bits per tuple)
 };
 
 /*
  * UnchainedHashTable:
- * Υλοποιεί τον "unchained" πίνακα κατακερματισμού όπως περιγράφεται στο paper.
+ * Implements the "unchained" hash table described in the paper.
  *
- * Βασικές ιδέες:
- * - Όλες οι πλειάδες αποθηκεύονται σε ένα ενιαίο contiguous buffer
- * - Οι πλειάδες ταξινομούνται ανά prefix hash
- * - Το directory κρατά εύρος indices + bloom filter
- * - Οι ανιχνεύσεις (probes) κάνουν:
+ * Key ideas:
+ * - All tuples are stored in a single contiguous buffer
+ * - Tuples are grouped by hash prefix
+ * - The directory stores range indices + a small bloom filter
+ * - Probing does:
  *      1. Prefix lookup (O(1))
- *      2. Bloom filter rejection (πολύ φθηνή πράξη)
- *      3. Γραμμική σάρωση στο bucket σε πολύ μικρό range
+ *      2. Bloom filter rejection (very cheap)
+ *      3. Linear scan inside the bucket over a very small range
  *
- * Δεν υπάρχουν chains (linked lists) → αποφυγή pointer chasing.
- * Δεν υπάρχουν διαρροές κλειδιών (όπως open addressing).
+ * No chains (linked lists) are used → avoids pointer chasing.
+ * No key spilling (unlike open addressing).
  */
 template<typename Key, typename Hasher = Hash::Hasher32>
 class UnchainedHashTable {
@@ -65,7 +65,7 @@ public:
 
     /*
      * directory_power = log2(directory_size)
-     * π.χ. directory_power=10 → 2^10 = 1024 buckets
+     * e.g. directory_power=10 → 2^10 = 1024 buckets
      */
     explicit UnchainedHashTable(Hasher hasher = Hasher(), std::size_t directory_power = 10)
         : hasher_(hasher)
@@ -77,8 +77,8 @@ public:
 
     /*
      * reserve():
-     * Αυξάνει το directory size αν περιμένουμε πολλά tuples.
-     * Πάντα στρογγυλοποιεί σε δύναμη του 2 όπως απαιτεί το paper.
+     * Increase directory size if we expect many tuples.
+     * Always rounds to a power-of-two as required by the paper.
      */
     void reserve(std::size_t tuples_capacity) {
         tuples_.reserve(tuples_capacity);
@@ -111,14 +111,14 @@ public:
     /*
      * build_from_entries():
      *
-     * 1. Υπολογίζει hash για κάθε key
-     * 2. Μετρά buckets (prefix counts)
-     * 3. Υπολογίζει prefix sums → προσδιορίζει τα ranges στο buffer
-     * 4. Γεμίζει το tuples_ buffer
-     * 5. Προσθέτει bloom bits στο directory
-     * 6. Γεμίζει τους δείκτες begin/end
+     * 1. Compute hash for each key
+     * 2. Count per prefix bucket
+     * 3. Compute prefix sums -> determine ranges in the buffer
+     * 4. Fill the tuples_ buffer
+     * 5. Add bloom bits to the directory
+     * 6. Fill begin/end indices
      *
-     * Μετά το build, το buffer είναι *πλήρως συμπαγές* και *ομαδοποιημένο* κατά hash prefix.
+     * After build the buffer is *compact* and *grouped* by hash prefix.
      */
     void build_from_entries(const std::vector<std::pair<Key,std::size_t>>& entries) {
         if (entries.empty()) {
@@ -130,7 +130,7 @@ public:
         // Reset bloom bits every build (begin/end will be overwritten below).
         for (auto &d : directory_) d.bloom = 0;
 
-        // Υπολογισμός hash values
+        // Compute hash values
         std::vector<uint64_t> hashes;
         hashes.reserve(entries.size());
         for (auto &e: entries)
@@ -151,10 +151,10 @@ public:
             total += counts[i];
         }
 
-        // Ακριβής κατανομή buffer
+        // Allocate exact buffer
         tuples_.assign(total, entry_type{});
 
-        // Συμπλήρωση tuples & bloom
+        // Fill tuples & bloom
         std::vector<std::size_t> write_ptr = offsets;
         for (std::size_t i = 0; i < entries.size(); ++i) {
             uint64_t h = hashes[i];
@@ -167,7 +167,7 @@ public:
             directory_[prefix].bloom |= Bloom::make_tag_from_hash(h);
         }
 
-        // 6) Καταχώρηση begin/end για κάθε bucket
+        // 6) Register begin/end for each bucket
         for (std::size_t i = 0; i < dir_size_; ++i) {
             directory_[i].begin_idx = offsets[i];
             directory_[i].end_idx   = (i+1 < dir_size_) ? offsets[i+1] : total;
@@ -176,7 +176,7 @@ public:
 
     /*
      * build_from_entries (overload for HashEntry):
-     * Adapter για να δέχεται HashEntry από το wrapper interface.
+     * Adapter to accept HashEntry from the wrapper interface.
      */
     void build_from_entries(const std::vector<Contest::HashEntry<Key>>& entries) {
         std::vector<std::pair<Key, std::size_t>> pairs;
@@ -190,7 +190,7 @@ public:
     /*
      * build_from_zero_copy_int32():
      * Fast path: build directly from a zero-copy INT32 column (no nulls).
-     * Simplified version (non-parallel) for backward compatibility.
+     * Simplified (non-parallel) version for backward compatibility.
      */
     void build_from_zero_copy_int32(const Column* src_column,
                                     const std::vector<std::size_t>& page_offsets,
@@ -268,7 +268,7 @@ public:
 
     /*
      * build_from_rows:
-     * Utility wrapper όταν τα δεδομένα είναι row-store.
+     * Utility wrapper when the data is row-store.
      */
     void build_from_rows(const std::vector<std::vector<Key>>& rows, std::size_t key_col) {
         std::vector<std::pair<Key,std::size_t>> entries;
@@ -281,13 +281,13 @@ public:
 
     /*
      * probe():
-     * 1. Υπολογίζει hash του key
-     * 2. Βρίσκει το prefix bucket
-     * 3. Ελέγχει bloom filter (απόρριψη φθηνά)
-     * 4. Επιστρέφει pointer στο range + length
+     * 1. Compute the key hash
+     * 2. Find the prefix bucket
+     * 3. Check the bloom filter (cheap rejection)
+     * 4. Return a pointer to the range + length
      *
-     * Σημείωση:
-     * Δεν κάνει exact match — αυτό γίνεται με probe_exact().
+     * Note:
+     * Does not perform exact matching — that is done by probe_exact().
      */
     const entry_type* probe(const Key& key, std::size_t& len) const {
         uint64_t h = compute_hash(key);
@@ -313,8 +313,8 @@ public:
 private:
     /*
      * compute_hash():
-     * Αν Key = 32-bit integer → χρησιμοποιεί τον Hasher (Fibonacci hashing)
-     * Αλλιώς fallback σε std::hash.
+     * If Key is a 32-bit integer -> use the Hasher (Fibonacci hashing)
+     * Otherwise fallback to std::hash.
      */
     uint64_t compute_hash(const Key& k) const {
         if constexpr (std::is_same_v<Key, int32_t> || std::is_same_v<Key, uint32_t>) {
@@ -325,8 +325,8 @@ private:
     }
 
     Hasher hasher_;
-    std::vector<entry_type> tuples_;     // contiguous buffer με όλα τα tuples
-    std::vector<dir_entry> directory_;   // directory με ranges + bloom
-    std::size_t dir_size_;               // πλήθος buckets
-    std::size_t dir_mask_;               // bitmask για prefix
+    std::vector<entry_type> tuples_;     // contiguous buffer with all tuples
+    std::vector<dir_entry> directory_;   // directory with ranges + bloom
+    std::size_t dir_size_;               // number of buckets
+    std::size_t dir_mask_;               // bitmask for prefix
 };

@@ -52,7 +52,7 @@ public:
 
     void build_from_entries(const std::vector<HashEntry<Key>>& entries) override {
         // Backend expects (key,row_id) pairs.
-        // (GR) Adapter layer: HashEntry -> pair. Δεν είναι το hot-path στο xenofon1 (default είναι unchained).
+        // Adapter layer: convert HashEntry -> pair. This is not the hot path in xenofon1 (default is unchained).
         std::vector<std::pair<Key, size_t>> pairs;
         pairs.reserve(entries.size());
         for (const auto &e : entries) pairs.emplace_back(e.key, static_cast<size_t>(e.row_id));

@@ -24,9 +24,9 @@ public:
     virtual void reserve(size_t capacity) = 0;
 
     // Builds the hash table from a vector of (key, row_id) entries.
-    // (GR) Χρησιμοποιούμε struct HashEntry αντί για std::pair ώστε:
-    // - να έχουμε σταθερή διάταξη (layout) και μικρότερο row_id (uint32_t)
-    // - να αποφεύγουμε περιττές μετατροπές/allocations σε wrappers
+    // We use struct HashEntry instead of std::pair to:
+    // - have a stable memory layout and a smaller row_id (uint32_t)
+    // - avoid unnecessary conversions/allocations in wrapper adapters
     virtual void build_from_entries(const std::vector<HashEntry<Key>>& entries) = 0;
 
     // Optional fast-path for INT32 columns with no NULLs.
