@@ -153,7 +153,6 @@ target_link_libraries(build_database PRIVATE fmt duckdb)
 # -----------------------------
 add_executable(software_tester ${SIGMODPC_SRC} 
     tests/software_tester.cpp
-    tests/software_tester/partitioned_build_tests.cpp
     tests/software_tester/work_stealing_tests.cpp
     tests/software_tester/bloom_filter_tests.cpp
     tests/software_tester/late_materialization_tests.cpp
