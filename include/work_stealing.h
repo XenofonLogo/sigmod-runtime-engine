@@ -8,29 +8,29 @@
 
 namespace Contest {
 
-// Ρυθμίσεις για work stealing (κατανομή εργασίας μεταξύ νημάτων)
+// Configuration for work stealing (work distribution between threads)
 struct WorkStealingConfig {
-    size_t total_work;           // Συνολικός αριθμός αντικειμένων προς επεξεργασία
-    size_t num_threads;          // Αριθμός νημάτων εργασίας
-    size_t min_block_size;       // Ελάχιστο μέγεθος block (προεπιλογή: 256)
-    size_t blocks_per_thread;    // Στόχος blocks ανά νήμα (προεπιλογή: 16)
+    size_t total_work;           // Total number of items to process
+    size_t num_threads;          // Number of worker threads
+    size_t min_block_size;       // Minimum block size (default: 256)
+    size_t blocks_per_thread;    // Target blocks per thread (default: 16)
     
-    // Υπολογισμός βέλτιστου μεγέθους block για ισοζύγιση φορτίου
+    // Compute optimal block size for load balancing
     size_t get_block_size() const;
 };
 
-// Συντονιστής work stealing με atomic counter
+// Work stealing coordinator with an atomic counter
 class WorkStealingCoordinator {
 public:
     explicit WorkStealingCoordinator(const WorkStealingConfig& config);
     
-    // Προσπάθεια να "κλέψει" ένα block εργασίας· true αν δόθηκε block, false αν τελείωσε η δουλειά
+    // Attempt to "steal" a work block; returns true if a block was given, false if work is finished
     bool steal_block(size_t& begin, size_t& end);
     
 private:
-    size_t total_work_;                 // Συνολικό έργο
-    size_t block_size_;                 // Μέγεθος block προς ανάθεση
-    std::atomic<size_t> work_counter_;  // Atomic μετρητής προόδου
+    size_t total_work_;                 // Total work
+    size_t block_size_;                 // Block size to assign
+    std::atomic<size_t> work_counter_;  // Atomic progress counter
 };
 
 } // namespace Contest

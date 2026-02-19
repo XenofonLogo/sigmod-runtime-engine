@@ -11,7 +11,7 @@ namespace Hash {
 //
 // Uses Donald Knuth's "magic constant":
 //   11400714819323198485ULL
-// which is 2^64 * (φ - 1), where φ is the golden ratio.
+// which is 2^64 * (phi - 1), where phi is the golden ratio.
 //
 // Advantages:
 // - Excellent distribution (bit diffusion)
